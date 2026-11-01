@@ -1,8 +1,10 @@
 //! Quadratic Assignment Problem: ports of metslib-examples/qap (main_ts.cc and
 //! main.cc), plus SA / LAHC / RRT and ILS on the same models, compared fairly:
 //! same time budget, several seeds, gap to the best-known value from QAPLIB.
+//! See `qap_advanced` for a stronger solver on the same models.
 //!
-//! Two models of the same problem show where the delta trick lives:
+//! Two models of the same problem (`examples/common/qap.rs`) show where the
+//! delta trick lives:
 //! * `QapPlain`: O(n) swap delta (like qap_model.hpp). Good for sampling
 //!   methods that evaluate one move per iteration.
 //! * `QapTaillard`: keeps Taillard's delta matrix, so a swap delta is O(1) and
@@ -25,256 +27,19 @@
 //!
 //! QAPLIB: https://qaplib.mgi.polymtl.ca/ (instances `*.dat`, solutions `*.sln`).
 
+#[path = "common/qap.rs"]
+mod common;
+
+use common::*;
 use mets::perm::{perturb, Permutation, SwapNeighborhood};
 use mets::rand::seq::SliceRandom;
 use mets::rand::{Rng, SeedableRng};
 use mets::*;
 use std::cell::Cell;
-use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-
-type C = i64;
-
-// ------------------------------------------------------------- instance
-
-struct Instance {
-    n: usize,
-    a: Vec<C>, // first matrix, row-major n×n
-    b: Vec<C>, // second matrix
-}
-
-impl Instance {
-    /// cost(p) = Σ a[i][j] · b[p[i]][p[j]]
-    fn cost_of(&self, p: &[usize]) -> C {
-        let n = self.n;
-        let mut s = 0;
-        for i in 0..n {
-            for j in 0..n {
-                s += self.a[i * n + j] * self.b[p[i] * n + p[j]];
-            }
-        }
-        s
-    }
-
-    /// O(n) delta of swapping positions r and s (valid for asymmetric instances).
-    fn swap_delta(&self, p: &[usize], r: usize, s: usize) -> C {
-        let n = self.n;
-        let (pr, ps) = (p[r], p[s]);
-        // row slices: bounds are checked once here, not in the loop
-        let (ar, as_) = (&self.a[r * n..][..n], &self.a[s * n..][..n]);
-        let (br, bs) = (&self.b[pr * n..][..n], &self.b[ps * n..][..n]);
-        let mut d = ar[r] * (bs[ps] - br[pr])
-            + ar[s] * (bs[pr] - br[ps])
-            + as_[r] * (br[ps] - bs[pr])
-            + as_[s] * (br[pr] - bs[ps]);
-        for (k, &pk) in p.iter().enumerate() {
-            if k == r || k == s {
-                continue;
-            }
-            let bk = &self.b[pk * n..][..n];
-            d += self.a[k * n + r] * (bk[ps] - bk[pr])
-                + self.a[k * n + s] * (bk[pr] - bk[ps])
-                + ar[k] * (bs[pk] - br[pk])
-                + as_[k] * (br[pk] - bs[pk]);
-        }
-        d
-    }
-
-    /// Like Taillard's taiXXa: symmetric matrices, zero diagonal, entries
-    /// uniform in 0..=99. (Not one of the published instances.)
-    fn random(n: usize, seed: u64) -> Self {
-        let mut rng = DefaultRng::seed_from_u64(seed);
-        let mut sym = || {
-            let mut m = vec![0; n * n];
-            for i in 0..n {
-                for j in i + 1..n {
-                    let v = rng.random_range(0..=99);
-                    m[i * n + j] = v;
-                    m[j * n + i] = v;
-                }
-            }
-            m
-        };
-        let a = sym();
-        let b = sym();
-        Instance { n, a, b }
-    }
-
-    fn parse(text: &str) -> Result<Self, String> {
-        let v: Vec<C> = text
-            .split_whitespace()
-            .map(|t| t.parse().map_err(|_| format!("bad number {t:?}")))
-            .collect::<Result<_, _>>()?;
-        let n = *v.first().ok_or("empty file")? as usize;
-        if v.len() != 1 + 2 * n * n {
-            return Err(format!(
-                "expected {} numbers for n = {n}, found {}",
-                1 + 2 * n * n,
-                v.len()
-            ));
-        }
-        Ok(Instance {
-            n,
-            a: v[1..1 + n * n].to_vec(),
-            b: v[1 + n * n..].to_vec(),
-        })
-    }
-
-    fn read(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
-    }
-}
-
-/// The best-known value of an instance, from a QAPLIB `.sln` file.
-///
-/// QAPLIB solution files do not all use the same convention: most list the
-/// permutation in the direction of `cost_of`, a few list its inverse, and a
-/// few are inconsistent (kra32's header is above the cost of its own
-/// permutation; tai40a's permutation is invalid). The permutation is checked
-/// both ways, and the reference is the lower of the header and the verified
-/// cost of the permutation.
-struct BestKnown {
-    value: C,
-    note: Option<String>,
-}
-
-fn read_sln(path: &Path, inst: &Instance) -> Result<BestKnown, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let v: Vec<i64> = text
-        .replace(',', " ")
-        .split_whitespace()
-        .map(|t| t.parse().unwrap_or(-1))
-        .collect();
-    if v.len() < 2 || v[0] as usize != inst.n {
-        return Err(format!(
-            "{}: header does not match the instance",
-            path.display()
-        ));
-    }
-    let header = v[1];
-    let n = inst.n;
-    let p: Vec<usize> = v[2..].iter().map(|&x| (x - 1) as usize).collect();
-    let mut seen = vec![false; n];
-    let valid = p.len() == n
-        && p.iter()
-            .all(|&x| x < n && !std::mem::replace(&mut seen[x], true));
-    if !valid {
-        return Ok(BestKnown {
-            value: header,
-            note: Some("permutation in .sln is invalid; header value used".into()),
-        });
-    }
-    let mut inv = vec![0; n];
-    for (i, &x) in p.iter().enumerate() {
-        inv[x] = i;
-    }
-    let (direct, inverse) = (inst.cost_of(&p), inst.cost_of(&inv));
-    Ok(if direct == header || inverse == header {
-        BestKnown {
-            value: header,
-            note: None,
-        }
-    } else {
-        let best = direct.min(inverse);
-        BestKnown {
-            value: best.min(header),
-            note: Some(format!(
-                "header {header} does not match its permutation ({best})"
-            )),
-        }
-    })
-}
-
-// ------------------------------------------------------------ plain model
-
-#[derive(Clone)]
-struct QapPlain<'a> {
-    inst: &'a Instance,
-    p: Vec<usize>,
-}
-
-impl Model for QapPlain<'_> {
-    type Cost = C;
-    fn evaluate(&self) -> C {
-        self.inst.cost_of(&self.p)
-    }
-}
-
-impl Permutation for QapPlain<'_> {
-    fn size(&self) -> usize {
-        self.p.len()
-    }
-    fn swap(&mut self, i: usize, j: usize) {
-        self.p.swap(i, j);
-    }
-    fn swap_delta(&self, i: usize, j: usize) -> Option<C> {
-        Some(self.inst.swap_delta(&self.p, i, j))
-    }
-}
-
-// --------------------------------------------------------- Taillard model
-
-#[derive(Clone)]
-struct QapTaillard<'a> {
-    inst: &'a Instance,
-    p: Vec<usize>,
-    delta: Vec<C>, // delta[r*n+s] for r<s
-}
-
-impl<'a> QapTaillard<'a> {
-    fn new(inst: &'a Instance, p: Vec<usize>) -> Self {
-        let n = inst.n;
-        let mut delta = vec![0; n * n];
-        for r in 0..n {
-            for s in r + 1..n {
-                delta[r * n + s] = inst.swap_delta(&p, r, s);
-            }
-        }
-        QapTaillard { inst, p, delta }
-    }
-}
-
-impl Model for QapTaillard<'_> {
-    type Cost = C;
-    fn evaluate(&self) -> C {
-        self.inst.cost_of(&self.p)
-    }
-}
-
-impl Permutation for QapTaillard<'_> {
-    fn size(&self) -> usize {
-        self.p.len()
-    }
-    #[inline]
-    fn swap_delta(&self, i: usize, j: usize) -> Option<C> {
-        Some(self.delta[i * self.inst.n + j]) // O(1)
-    }
-    fn swap(&mut self, u: usize, v: usize) {
-        let (inst, n) = (self.inst, self.inst.n);
-        let (a, b) = (&inst.a, &inst.b);
-        self.p.swap(u, v);
-        let p = &self.p;
-        // Taillard's O(1) update for pairs disjoint from {u, v}, O(n) otherwise
-        for r in 0..n {
-            for s in r + 1..n {
-                let d = &mut self.delta[r * n + s];
-                if r == u || r == v || s == u || s == v {
-                    *d = inst.swap_delta(p, r, s);
-                } else {
-                    let (pr, ps, pu, pv) = (p[r], p[s], p[u], p[v]);
-                    *d += (a[r * n + u] - a[r * n + v] + a[s * n + v] - a[s * n + u])
-                        * (b[ps * n + pu] - b[ps * n + pv] + b[pr * n + pv] - b[pr * n + pu])
-                        + (a[u * n + r] - a[v * n + r] + a[v * n + s] - a[u * n + s])
-                            * (b[pu * n + ps] - b[pv * n + ps] + b[pv * n + pr] - b[pu * n + pr]);
-                }
-            }
-        }
-    }
-}
 
 // ------------------------------------------------- counting evaluations
 
@@ -446,6 +211,8 @@ fn tabu_sampled(r: &Run) -> RunResult {
     }
 }
 
+/// The three nested loops of metslib-examples qap/main.cc: random restarts of
+/// an iterated tabu search with random tenure.
 fn restarts_its(r: &Run) -> RunResult {
     let n = r.inst.n;
     let count = Rc::new(Cell::new(0));
@@ -556,35 +323,19 @@ const METHODS: [Method; 7] = [
     ("record-to-record travel", record_to_record),
 ];
 
-fn random_start(n: usize, seed: u64) -> Vec<usize> {
-    let mut p: Vec<usize> = (0..n).collect();
-    p.shuffle(&mut DefaultRng::seed_from_u64(seed ^ 0x9e37_79b9_7f4a_7c15));
-    p
-}
-
-fn gap(cost: C, best_known: C) -> f64 {
-    (cost - best_known) as f64 * 100.0 / (best_known as f64).abs().max(1.0)
-}
-
 // ------------------------------------------------------------------ modes
 
-struct Options {
+fn compare(
+    name: &str,
+    inst: &Instance,
+    best_known: Option<BestKnown>,
     budget: Duration,
     seeds: u64,
-    /// `--qaplib` only: random restarts per run instead of a time budget.
-    restarts: Option<u64>,
-    /// `--qaplib` only: instances solved in parallel.
-    jobs: usize,
-    /// `--qaplib` only: print a Markdown table.
-    markdown: bool,
-}
-
-fn compare(name: &str, inst: &Instance, best_known: Option<BestKnown>, opt: &Options) {
+) {
     print!(
-        "{name}: n = {}, {:.1} s per run, {} seed(s)",
+        "{name}: n = {}, {:.1} s per run, {seeds} seed(s)",
         inst.n,
-        opt.budget.as_secs_f64(),
-        opt.seeds
+        budget.as_secs_f64()
     );
     match &best_known {
         Some(b) => println!(
@@ -608,12 +359,12 @@ fn compare(name: &str, inst: &Instance, best_known: Option<BestKnown>, opt: &Opt
     );
     for (label, method) in METHODS {
         let mut results = Vec::new();
-        for seed in 1..=opt.seeds {
+        for seed in 1..=seeds {
             let run = Run {
                 inst,
                 start: random_start(inst.n, seed),
                 seed,
-                budget: opt.budget,
+                budget,
                 restarts: None,
             };
             let t = Instant::now();
@@ -640,201 +391,6 @@ fn compare(name: &str, inst: &Instance, best_known: Option<BestKnown>, opt: &Opt
             }
             None => println!("{label:<42} {mean:>10.0} {best:>10} {evals_per_s:>14.3e}"),
         }
-    }
-}
-
-/// One instance of the sweep.
-struct SweepRow {
-    name: String,
-    n: usize,
-    found: C,
-    best_known: Option<C>,
-    note: Option<String>,
-    secs: f64,
-}
-
-fn solve_instance(data: &Path, soln: &Path, name: &str, opt: &Options) -> Result<SweepRow, String> {
-    let inst = Instance::read(&data.join(format!("{name}.dat")))?;
-    let sln = soln.join(format!("{name}.sln"));
-    let (best_known, note) = if sln.exists() {
-        match read_sln(&sln, &inst) {
-            Ok(b) => (Some(b.value), b.note),
-            Err(e) => (None, Some(e)),
-        }
-    } else {
-        (None, Some("no published solution".into()))
-    };
-    let t = Instant::now();
-    let found = (1..=opt.seeds)
-        .map(|seed| {
-            let run = Run {
-                inst: &inst,
-                start: random_start(inst.n, seed),
-                seed,
-                budget: opt.budget,
-                restarts: opt.restarts,
-            };
-            restarts_its(&run).best
-        })
-        .min()
-        .unwrap();
-    Ok(SweepRow {
-        name: name.into(),
-        n: inst.n,
-        found,
-        best_known,
-        note,
-        secs: t.elapsed().as_secs_f64(),
-    })
-}
-
-fn sweep(data: &Path, soln: &Path, opt: &Options) {
-    let mut names: Vec<String> = std::fs::read_dir(data)
-        .expect("cannot read the data directory")
-        .filter_map(|e| {
-            e.ok()?
-                .file_name()
-                .to_str()?
-                .strip_suffix(".dat")
-                .map(String::from)
-        })
-        .collect();
-    names.sort();
-    let stop = match opt.restarts {
-        Some(r) => format!(
-            "{r} random restarts, each an iterated tabu search (tabu runs stop after 200 iterations \
-             without improvement, the iterated search after 20 perturbations without improvement)"
-        ),
-        None => format!("{} s per instance", opt.budget.as_secs_f64()),
-    };
-    let setup = format!("restarts(ITS(tabu)), {stop}, best of {} seed(s)", opt.seeds);
-
-    // solve in parallel, `jobs` instances at a time, largest files first so the
-    // long runs don't start last; print in name order
-    let size =
-        |name: &String| std::fs::metadata(data.join(format!("{name}.dat"))).map_or(0, |m| m.len());
-    let mut order: Vec<usize> = (0..names.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(size(&names[i])));
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let results = std::sync::Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for _ in 0..opt.jobs.max(1) {
-            scope.spawn(|| loop {
-                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(&i) = order.get(k) else { break };
-                let name = &names[i];
-                match solve_instance(data, soln, name, opt) {
-                    Ok(row) => {
-                        eprintln!("{:<10} {:>12} {:>8.1}s", row.name, row.found, row.secs);
-                        results.lock().unwrap().push((i, row));
-                    }
-                    Err(e) => eprintln!("{name}: skipped: {e}"),
-                }
-            });
-        }
-    });
-    let mut rows = results.into_inner().unwrap();
-    rows.sort_by_key(|(i, _)| *i);
-    let rows: Vec<SweepRow> = rows.into_iter().map(|(_, r)| r).collect();
-
-    if !opt.markdown {
-        println!("{setup}");
-        println!(
-            "{:<10} {:>4} {:>12} {:>12} {:>8} {:>8}  note",
-            "instance", "n", "found", "best known", "gap", "time"
-        );
-        for row in &rows {
-            let (bk, g) = match row.best_known {
-                Some(b) => (b.to_string(), format!("{:.2}%", gap(row.found, b))),
-                None => ("-".into(), "-".into()),
-            };
-            println!(
-                "{:<10} {:>4} {:>12} {bk:>12} {g:>8} {:>7.1}s  {}",
-                row.name,
-                row.n,
-                row.found,
-                row.secs,
-                row.note.as_deref().unwrap_or("")
-            );
-        }
-    }
-
-    // summary by family (instances with a best-known value)
-    let mut families: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    for r in &rows {
-        if let Some(b) = r.best_known {
-            let family: String = r
-                .name
-                .chars()
-                .take_while(|c| c.is_ascii_alphabetic())
-                .collect();
-            families.entry(family).or_default().push(gap(r.found, b));
-        }
-    }
-    let with_bk = rows.iter().filter(|r| r.best_known.is_some()).count();
-    let reached = rows
-        .iter()
-        .filter(|r| r.best_known.is_some_and(|b| r.found <= b))
-        .count();
-    let improved: Vec<&SweepRow> = rows
-        .iter()
-        .filter(|r| r.best_known.is_some_and(|b| r.found < b))
-        .collect();
-
-    if opt.markdown {
-        println!("{setup}: {} instances, best-known value reached on {reached} of the {with_bk} that have one.\n", rows.len());
-        println!("| Instance | n | Found | Best known | Gap | Time (s) |");
-        println!("|---|---:|---:|---:|---:|---:|");
-        for r in &rows {
-            let mark = if r.note.is_some() { " *" } else { "" };
-            match r.best_known {
-                Some(b) => println!(
-                    "| {}{mark} | {} | {} | {b} | {:.2}% | {:.1} |",
-                    r.name,
-                    r.n,
-                    r.found,
-                    gap(r.found, b),
-                    r.secs
-                ),
-                None => println!(
-                    "| {}{mark} | {} | {} | — | — | {:.1} |",
-                    r.name, r.n, r.found, r.secs
-                ),
-            }
-        }
-        let notes: Vec<&SweepRow> = rows.iter().filter(|r| r.note.is_some()).collect();
-        if !notes.is_empty() {
-            println!("\n\\* Notes:\n");
-            for r in notes {
-                println!("- `{}`: {}", r.name, r.note.as_deref().unwrap_or(""));
-            }
-        }
-        println!("\n| Family | Instances | Best known reached | Mean gap | Max gap |");
-        println!("|---|---:|---:|---:|---:|");
-    } else {
-        println!(
-            "\nbest-known value reached on {reached} of {with_bk} instances; mean gap by family:"
-        );
-    }
-    for (family, gaps) in &families {
-        let at_best = gaps.iter().filter(|&&g| g <= 0.0).count();
-        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
-        let max = gaps.iter().cloned().fold(f64::MIN, f64::max);
-        if opt.markdown {
-            println!(
-                "| {family} | {} | {at_best} | {mean:.2}% | {max:.2}% |",
-                gaps.len()
-            );
-        } else {
-            println!(
-                "  {family:<5} {:>3} instances  mean {mean:>6.2}%  max {max:>6.2}%  best known reached on {at_best}",
-                gaps.len()
-            );
-        }
-    }
-    if !improved.is_empty() {
-        let list: Vec<String> = improved.iter().map(|r| r.name.clone()).collect();
-        println!("\nbetter than the best-known value: {}", list.join(", "));
     }
 }
 
@@ -888,23 +444,16 @@ fn bench(inst: &Instance, iters: u64) {
 }
 
 fn main() {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let markdown = args.iter().any(|a| a == "--markdown");
-    args.retain(|a| a != "--markdown");
-    let mut take = |flag: &str| -> Option<String> {
-        let i = args.iter().position(|a| a == flag)?;
-        let v = args.get(i + 1).cloned();
-        args.drain(i..(i + 2).min(args.len()));
-        v
-    };
-    let seconds: Option<f64> = take("--seconds").map(|s| s.parse().expect("--seconds S"));
-    let restarts: Option<u64> = take("--restarts").map(|s| s.parse().expect("--restarts R"));
-    let jobs: usize = take("--jobs")
-        .map(|s| s.parse().expect("--jobs J"))
+    let mut args = Args::from_env();
+    let markdown = args.flag("--markdown");
+    let seconds: Option<f64> = args.value("--seconds");
+    let restarts: Option<u64> = args.value("--restarts");
+    let jobs: usize = args
+        .value("--jobs")
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let seeds: Option<u64> = take("--seeds").map(|s| s.parse().expect("--seeds K"));
-    let bench_iters: Option<u64> = take("--bench").map(|s| s.parse().expect("--bench ITERS"));
-    let qaplib = args.iter().position(|a| a == "--qaplib");
+    let seeds: Option<u64> = args.value("--seeds");
+    let bench_iters: Option<u64> = args.value("--bench");
+    let args = args.0;
     // with --restarts and no --seconds, runs are not time-limited
     let budget = match (seconds, restarts) {
         (Some(s), _) => Duration::from_secs_f64(s),
@@ -912,30 +461,50 @@ fn main() {
         (None, None) => Duration::from_secs(1),
     };
 
-    if let Some(i) = qaplib {
+    if let Some(i) = args.iter().position(|a| a == "--qaplib") {
         let (data, soln) = (
             args.get(i + 1).expect("--qaplib DATA_DIR SOLN_DIR"),
             args.get(i + 2).expect("SOLN_DIR"),
         );
+        let seeds = seeds.unwrap_or(1);
+        let stop = match restarts {
+            Some(r) => format!(
+                "{r} random restarts, each an iterated tabu search (tabu runs stop after 200 iterations \
+                 without improvement, the iterated search after 20 perturbations without improvement)"
+            ),
+            None => format!("{} s per instance", budget.as_secs_f64()),
+        };
+        let opt = SweepOptions {
+            setup: format!("restarts(ITS(tabu)), {stop}, best of {seeds} seed(s)"),
+            instance_jobs: jobs,
+            markdown,
+        };
         return sweep(
             Path::new(data),
             Path::new(soln),
-            &Options {
-                budget,
-                seeds: seeds.unwrap_or(1),
-                restarts,
-                jobs,
-                markdown,
+            &opt,
+            |inst, _best_known| {
+                let found = (1..=seeds)
+                    .map(|seed| {
+                        restarts_its(&Run {
+                            inst,
+                            start: random_start(inst.n, seed),
+                            seed,
+                            budget,
+                            restarts,
+                        })
+                        .best
+                    })
+                    .min()
+                    .unwrap();
+                Solved {
+                    found,
+                    to_found: None,
+                }
             },
         );
     }
-    let opt = Options {
-        budget,
-        seeds: seeds.unwrap_or(3),
-        restarts: None,
-        jobs: 1,
-        markdown,
-    };
+    let seeds = seeds.unwrap_or(3);
     match args.first() {
         None => {
             if let Some(iters) = bench_iters {
@@ -945,7 +514,8 @@ fn main() {
                 "random Taillard-like instance",
                 &Instance::random(60, 1),
                 None,
-                &opt,
+                budget,
+                seeds,
             )
         }
         Some(dat) => {
@@ -958,7 +528,7 @@ fn main() {
                 .get(1)
                 .map(|s| read_sln(Path::new(s), &inst).unwrap_or_else(|e| panic!("{e}")));
             let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or(dat);
-            compare(name, &inst, best_known, &opt)
+            compare(name, &inst, best_known, budget, seeds)
         }
     }
 }
@@ -970,6 +540,7 @@ mod tests {
     #[test]
     fn deltas_match_full_evaluation() {
         let inst = Instance::random(13, 5);
+        assert!(inst.symmetric);
         let mut st = State::new(QapTaillard::new(&inst, (0..13).collect()), 1);
         for _ in 0..200 {
             st.modify_current(|s, rng| perturb(s, 1, rng));
@@ -984,11 +555,17 @@ mod tests {
 
     #[test]
     fn asymmetric_deltas_match_too() {
-        let mut inst = Instance::random(11, 9);
-        inst.a[3] += 17; // break the symmetry and the zero diagonal
-        inst.b[11 * 4 + 4] = 5;
-        let s = Evaluated::new(QapTaillard::new(&inst, random_start(11, 2)));
-        assert!(check::deltas(&mut SwapNeighborhood, &s).is_empty());
+        let sym = Instance::random(11, 9);
+        let (mut a, mut b) = (sym.a.clone(), sym.b.clone());
+        a[3] += 17; // break the symmetry and the zero diagonal
+        b[11 * 4 + 4] = 5;
+        let inst = Instance::new(11, a, b);
+        assert!(!inst.symmetric);
+        let mut st = State::new(QapTaillard::new(&inst, random_start(11, 2)), 1);
+        for _ in 0..50 {
+            st.modify_current(|s, rng| perturb(s, 1, rng));
+            assert!(check::deltas(&mut SwapNeighborhood, st.current()).is_empty());
+        }
     }
 
     #[test]
