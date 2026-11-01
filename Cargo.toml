@@ -1,0 +1,19 @@
+[package]
+name = "mets"
+version = "0.1.0"
+edition = "2021"
+description = "Neighborhood-based metaheuristics (local search, tabu search, SA, LAHC, ILS…): a Rust port of METSlib"
+license = "GPL-3.0-or-later OR CPL-1.0"
+repository = "https://github.com/baol/mets"
+readme = "README.md"
+publish = false
+
+[profile.release]
+debug = false
+lto = true
+codegen-units = 1
+
+[dependencies]
+num-traits = "0.2"
+rand = { version = "0.9", default-features = false, features = ["std"] }
+rand_xoshiro = "0.7"
