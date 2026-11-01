@@ -2,8 +2,11 @@
 
 Neighborhood-based metaheuristics in Rust: local search, tabu search,
 simulated annealing, late acceptance, record-to-record travel, threshold
-accepting, great deluge, and iterated searches (ILS, iterated tabu search,
-random restarts). A Rust port of [METSlib](https://github.com/baol/metslib).
+accepting, great deluge, iterated searches (ILS, iterated tabu search,
+random restarts), large neighborhood search and memetic algorithms, plus
+ready-made pieces for permutation problems (robust tabu search, a very large
+rearrangement neighborhood, uniform crossover). A Rust port of
+[METSlib](https://github.com/baol/metslib).
 
 You write the objective and the moves; deltas are optional, and the library
 keeps the cached cost correct.
@@ -24,7 +27,7 @@ impl Model for Sort {
 }
 
 impl Permutation for Sort {
-    fn size(&self) -> usize { self.0.len() }
+    fn as_slice(&self) -> &[usize] { &self.0 }
     fn swap(&mut self, i: usize, j: usize) { self.0.swap(i, j) }
 }
 
@@ -49,6 +52,7 @@ it against the full evaluation.
 cargo run --release --example subset_sum   # tabu search (METSlib tutorial)
 cargo run --release --example vcp          # graph colouring, TabuCol-like iterated tabu
 cargo run --release --example qap          # QAP: 7 methods, same time budget, 3 seeds
+cargo run --release --example qap_advanced -- tai60a.dat tai60a.sln   # memetic / restarts / lns
 ```
 
 The QAP example also reads [QAPLIB](https://qaplib.mgi.polymtl.ca/)

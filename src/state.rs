@@ -144,6 +144,36 @@ impl<S: Model, R> State<S, R> {
             );
         }
 
+        self.after_move(delta, obs)
+    }
+
+    /// Make `candidate` the current solution, record the best solutions and
+    /// notify the observer. For moves built on a copy of the current solution
+    /// (large neighborhood search, crossover), where no `Move` value exists.
+    ///
+    /// In debug builds the candidate's cached cost is checked against a full
+    /// evaluation.
+    pub fn replace_current(
+        &mut self,
+        candidate: &Evaluated<S>,
+        obs: &mut dyn Observer<S, R>,
+    ) -> Step {
+        #[cfg(debug_assertions)]
+        {
+            let fresh = candidate.evaluate();
+            assert!(
+                approx_eq(fresh, candidate.cost(), fresh),
+                "candidate's cached cost {:?} differs from its evaluation {fresh:?}",
+                candidate.cost()
+            );
+        }
+        let delta = candidate.cost() - self.current.cost();
+        self.current.clone_from(candidate);
+        self.after_move(delta, obs)
+    }
+
+    /// Shared tail of `commit` and `replace_current`.
+    fn after_move(&mut self, delta: S::Cost, obs: &mut dyn Observer<S, R>) -> Step {
         obs.notify(Event::Moved { delta }, self);
         if !self.is_better(self.current.cost(), self.best.cost()) {
             return Step::Moved;

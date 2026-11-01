@@ -39,6 +39,55 @@ impl<S: Model, F: FnMut(&mut Evaluated<S>, &mut dyn RngCore)> Perturbation<S>
     }
 }
 
+/// A perturbation whose strength adapts: it starts at `min`, grows by `step`
+/// (up to `max`) each time it is applied to an unchanged incumbent, and goes
+/// back to `min` when the incumbent changes. The idea of breakout local
+/// search: shake harder while stuck, gently after progress.
+///
+/// `apply(s, strength, rng)` does the perturbing, e.g. `strength` random
+/// moves (see `perm::adaptive_perturbation`).
+pub struct Adaptive<F, C> {
+    pub min: usize,
+    pub step: usize,
+    pub max: usize,
+    strength: usize,
+    last: Option<C>,
+    apply: F,
+}
+
+impl<F, C> Adaptive<F, C> {
+    pub fn new(min: usize, step: usize, max: usize, apply: F) -> Self {
+        Adaptive {
+            min,
+            step,
+            max: max.max(min),
+            strength: min,
+            last: None,
+            apply,
+        }
+    }
+    /// The strength used by the last perturbation.
+    pub fn strength(&self) -> usize {
+        self.strength
+    }
+}
+
+impl<S, F> Perturbation<S> for Adaptive<F, S::Cost>
+where
+    S: Model,
+    F: FnMut(&mut Evaluated<S>, usize, &mut dyn RngCore),
+{
+    fn perturb(&mut self, s: &mut Evaluated<S>, rng: &mut dyn RngCore) {
+        let cost = s.cost();
+        self.strength = match self.last {
+            Some(c) if c == cost => (self.strength + self.step).min(self.max),
+            _ => self.min,
+        };
+        self.last = Some(cost);
+        (self.apply)(s, self.strength, rng)
+    }
+}
+
 pub struct IteratedSearch<S: Model, I, T, P, A> {
     pub inner: I,
     /// Termination criterion of each inner run (restarted for every run).

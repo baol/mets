@@ -1,0 +1,175 @@
+//! Memetic algorithm: a population of improved solutions, where new starting
+//! points come from recombining two members instead of restarting from
+//! scratch.
+//!
+//! [`Memetic`] is a steady-state scheme. Each step builds a starting point
+//! (a fresh one while the population is filling, then a child of two random
+//! members), improves it with any inner [`Search`] in its own best-scope (as
+//! [`IteratedSearch`](crate::IteratedSearch) does), and inserts the result
+//! in place of the worst member if it is better and its cost is not already
+//! present. When no child has entered the population for a while, every
+//! member but the best is replaced by fresh solutions (diversification).
+
+use crate::ils::Perturbation;
+use crate::{Evaluated, Event, Model, Observer, Search, SearchExt, State, Step, Termination};
+use rand::{Rng, RngCore};
+use std::marker::PhantomData;
+
+/// Combines two parents into a child.
+pub trait Crossover<S: Model> {
+    /// Turn `child`, which holds a copy of `a`, into a child of `a` and `b`.
+    /// The library re-evaluates it afterwards.
+    fn cross(&mut self, a: &S, b: &S, child: &mut S, rng: &mut dyn RngCore);
+}
+
+/// A closure as a crossover: `crossover_with(|a: &P, b, child, rng| ..)`.
+pub struct CrossoverWith<F, S>(F, PhantomData<fn(&mut S)>);
+pub fn crossover_with<S: Model, F: FnMut(&S, &S, &mut S, &mut dyn RngCore)>(
+    f: F,
+) -> CrossoverWith<F, S> {
+    CrossoverWith(f, PhantomData)
+}
+impl<S: Model, F: FnMut(&S, &S, &mut S, &mut dyn RngCore)> Crossover<S> for CrossoverWith<F, S> {
+    fn cross(&mut self, a: &S, b: &S, child: &mut S, rng: &mut dyn RngCore) {
+        (self.0)(a, b, child, rng)
+    }
+}
+
+pub struct Memetic<S: Model, I, T, P, X> {
+    pub inner: I,
+    /// Termination criterion of each improvement run.
+    pub inner_stop: T,
+    /// Turns the current solution into a fresh starting point (e.g. a shuffle).
+    pub init: P,
+    pub crossover: X,
+    pub size: usize,
+    /// Steps without an insertion before the population is renewed
+    /// (all but the best member). `u64::MAX`: never.
+    pub renew_after: u64,
+    population: Vec<Evaluated<S>>,
+    since_insertion: u64,
+}
+
+impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
+    pub fn new(inner: I, inner_stop: T, init: P, crossover: X, size: usize) -> Self {
+        assert!(size >= 2, "a population needs at least two members");
+        Memetic {
+            inner,
+            inner_stop,
+            init,
+            crossover,
+            size,
+            renew_after: u64::MAX,
+            population: Vec::new(),
+            since_insertion: 0,
+        }
+    }
+
+    /// Renew the population (all but its best member) after `steps` steps
+    /// without an insertion.
+    pub fn renew_after(mut self, steps: u64) -> Self {
+        self.renew_after = steps;
+        self
+    }
+
+    pub fn population(&self) -> &[Evaluated<S>] {
+        &self.population
+    }
+
+    /// Insert `s` in place of the worst member if it is better and its cost
+    /// is not present yet (a cheap duplicate test). Returns true if inserted.
+    fn insert(&mut self, s: Evaluated<S>) -> bool {
+        if self.population.iter().any(|m| m.cost() == s.cost()) {
+            return false;
+        }
+        if self.population.len() < self.size {
+            self.population.push(s);
+            return true;
+        }
+        let worst = (0..self.population.len())
+            .max_by(|&a, &b| {
+                self.population[a]
+                    .cost()
+                    .partial_cmp(&self.population[b].cost())
+                    .unwrap()
+            })
+            .expect("non-empty population");
+        if s.cost() < self.population[worst].cost() {
+            self.population[worst] = s;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl<S, R, I, T, P, X> Search<S, R> for Memetic<S, I, T, P, X>
+where
+    S: Model,
+    R: Rng,
+    I: Search<S, R>,
+    T: Termination<S, R>,
+    P: Perturbation<S>,
+    X: Crossover<S>,
+{
+    fn step(&mut self, st: &mut State<S, R>, obs: &mut dyn Observer<S, R>) -> Step {
+        // renew a converged population, keeping its best member
+        if self.since_insertion >= self.renew_after && self.population.len() >= self.size {
+            let best = (0..self.population.len())
+                .min_by(|&a, &b| {
+                    self.population[a]
+                        .cost()
+                        .partial_cmp(&self.population[b].cost())
+                        .unwrap()
+                })
+                .unwrap();
+            self.population.swap(0, best);
+            self.population.truncate(1);
+            self.since_insertion = 0;
+        }
+
+        // 1. a starting point: fresh while filling, then a child
+        if self.population.len() < self.size {
+            let init = &mut self.init;
+            st.modify_current(|cur, rng| init.perturb(cur, rng));
+        } else {
+            let (pop, crossover) = (&self.population, &mut self.crossover);
+            st.modify_current(|cur, rng| {
+                let a = rng.random_range(0..pop.len());
+                let mut b = rng.random_range(0..pop.len() - 1);
+                if b >= a {
+                    b += 1;
+                }
+                cur.clone_from(&pop[a]);
+                cur.modify(|child| crossover.cross(&pop[a], &pop[b], child, rng));
+            });
+        }
+        obs.notify(Event::Restart, st);
+
+        // 2. improve it, with its own best
+        let mut scope = st.scope();
+        self.inner
+            .runner(scope.state())
+            .until(&mut self.inner_stop)
+            .observe(&mut *obs)
+            .run();
+        let (run_best, improved_outer) = scope.finish();
+
+        // 3. replace the worst member
+        if self.insert(run_best) {
+            self.since_insertion = 0;
+        } else {
+            self.since_insertion += 1;
+        }
+        if improved_outer {
+            Step::Improved
+        } else {
+            Step::Moved
+        }
+    }
+
+    fn start(&mut self, _st: &mut State<S, R>) {
+        self.population.clear();
+        self.since_insertion = 0;
+    }
+}

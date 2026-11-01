@@ -1,14 +1,33 @@
-//! Ready-made pieces for permutation problems (QAP, TSP, scheduling…): the
-//! counterpart of METSlib's `permutation_problem`, `swap_elements`,
-//! `swap_full_neighborhood` and `swap_neighborhood`.
+//! Ready-made pieces for permutation problems (QAP, TSP, scheduling…).
+//!
+//! * The counterparts of METSlib's `permutation_problem`, `swap_elements`,
+//!   `swap_full_neighborhood` and `swap_neighborhood`: [`Permutation`],
+//!   [`Swap`], [`SwapNeighborhood`], [`perturb`], [`shuffle`].
+//! * [`RobustTabuSearch`]: Taillard's robust tabu search, with tabu
+//!   attributes on assignments (element at position).
+//! * [`BestRearrangement`]: a very large neighborhood for
+//!   [`LargeNeighborhoodSearch`](crate::LargeNeighborhoodSearch): all k!
+//!   arrangements of k random positions.
+//! * [`UniformCrossover`] for [`Memetic`](crate::Memetic), and
+//!   [`adaptive_perturbation`] for [`IteratedSearch`](crate::IteratedSearch).
 
-use crate::{DenseAttr, Evaluated, Model, Move, Neighborhood, Sampler, TabuAttr, Visitor};
-use rand::Rng;
+use crate::ils::Adaptive;
+use crate::{
+    Crossover, DefaultRng, DenseAttr, Evaluated, Model, Move, Neighborhood, Observer, Rebuild,
+    Sampler, Search, State, Step, TabuAttr, Visitor,
+};
+use num_traits::Bounded;
+use rand::{Rng, RngCore, SeedableRng};
 use std::ops::ControlFlow;
 
 /// A solution encoded as a permutation.
 pub trait Permutation: Model {
-    fn size(&self) -> usize;
+    /// The permutation: element at each position.
+    fn as_slice(&self) -> &[usize];
+    #[inline]
+    fn size(&self) -> usize {
+        self.as_slice().len()
+    }
     /// Exchange the elements at positions `i` and `j`.
     fn swap(&mut self, i: usize, j: usize);
     /// `cost(after swap) - cost(before)`, if you have a formula. Default:
@@ -131,4 +150,297 @@ pub fn shuffle<S: Permutation, R: Rng + ?Sized>(s: &mut Evaluated<S>, rng: &mut 
             }
         }
     })
+}
+
+/// `perturb(s, strength, rng)` as a function pointer, for [`Adaptive`].
+pub type PerturbFn<S> = fn(&mut Evaluated<S>, usize, &mut dyn RngCore);
+
+/// [`perturb`] with an adaptive number of swaps: from `max(2, n/10)`, growing
+/// by `max(1, n/20)` up to `n/2` while the incumbent does not change.
+pub fn adaptive_perturbation<S: Permutation>(n: usize) -> Adaptive<PerturbFn<S>, S::Cost> {
+    fn apply<S: Permutation>(s: &mut Evaluated<S>, k: usize, rng: &mut dyn RngCore) {
+        perturb(s, k, rng)
+    }
+    Adaptive::new((n / 10).max(2), (n / 20).max(1), (n / 2).max(3), apply::<S>)
+}
+
+/// Rearrange `s` so that its element at each position is `target[position]`,
+/// with at most n − 1 swaps (through `Permutation::swap`, so incremental
+/// structures of the model stay valid). Call it inside `Evaluated::modify`.
+pub fn rearrange<S: Permutation>(s: &mut S, target: &[usize]) {
+    let n = s.size();
+    debug_assert_eq!(target.len(), n);
+    let mut position = vec![0; n];
+    for (i, &e) in s.as_slice().iter().enumerate() {
+        position[e] = i;
+    }
+    for (i, &wanted) in target.iter().enumerate() {
+        let current = s.as_slice()[i];
+        if current != wanted {
+            let j = position[wanted];
+            s.swap(i, j);
+            position[current] = j;
+            position[wanted] = i;
+        }
+    }
+}
+
+// ----------------------------------------------------------- robust tabu search
+
+/// Taillard's robust tabu search (1991) on the swap neighborhood, for any
+/// [`Permutation`].
+///
+/// The tabu memory is about *assignments*, not position pairs: a swap is tabu
+/// when it would put both elements back into positions they left within the
+/// tenure. The tenure is re-drawn from `[0.9n, 1.1n]` every `2·1.1n`
+/// iterations. A long-term aspiration *forces* a move that re-creates an
+/// assignment not seen for `5n²` iterations, even if it is worsening: that is
+/// why this is its own `Search` and not a `TabuList` for `TabuSearch`, which
+/// can only make moves admissible.
+///
+/// The memory persists across runs (`start` only re-seeds the tenure draw),
+/// so as the inner search of an iterated or memetic search it remembers the
+/// whole history. Every iteration scans all n(n−1)/2 swaps: use a model with
+/// O(1) swap deltas (a delta matrix) for large n.
+pub struct RobustTabuSearch {
+    /// Tenure range as fractions of n.
+    pub tenure: (f64, f64),
+    /// Long-term aspiration age as a multiple of n².
+    pub aspiration: f64,
+    n: usize,
+    t: Vec<i64>,
+    current_tenure: i64,
+    next_redraw: u64,
+    aspiration_age: i64,
+    rng: DefaultRng,
+}
+
+impl Default for RobustTabuSearch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RobustTabuSearch {
+    pub fn new() -> Self {
+        RobustTabuSearch {
+            tenure: (0.9, 1.1),
+            aspiration: 5.0,
+            n: 0,
+            t: Vec::new(),
+            current_tenure: 1,
+            next_redraw: 0,
+            aspiration_age: 0,
+            rng: DefaultRng::seed_from_u64(0),
+        }
+    }
+
+    /// Size the memory for permutations of size n (done by `start`).
+    fn prepare(&mut self, n: usize) {
+        if self.n != n {
+            self.n = n;
+            // staggered "never" so that unseen assignments become aspired one at a time
+            self.t = (0..n * n).map(|k| -(k as i64)).collect();
+            self.aspiration_age = (self.aspiration * (n * n) as f64) as i64;
+        }
+    }
+
+    fn redraw(&mut self, it: u64) {
+        let n = self.n as f64;
+        let lo = ((self.tenure.0 * n) as i64).max(1);
+        let hi = ((self.tenure.1 * n) as i64).max(lo);
+        self.current_tenure = self.rng.random_range(lo..=hi);
+        self.next_redraw = it + 2 * hi as u64;
+    }
+
+    /// (authorized, aspired) for swapping positions i and j of `p` at iteration `it`.
+    #[inline]
+    fn classify(&self, p: &[usize], i: usize, j: usize, it: i64) -> (bool, bool) {
+        let n = self.n;
+        let (ti, tj) = (self.t[i * n + p[j]], self.t[j * n + p[i]]); // p[j] back to i, p[i] back to j
+        let authorized = ti < it || tj < it;
+        let aspired = ti < it - self.aspiration_age || tj < it - self.aspiration_age;
+        (authorized, aspired)
+    }
+}
+
+impl<S: Permutation, R: Rng> Search<S, R> for RobustTabuSearch {
+    fn step(&mut self, st: &mut State<S, R>, obs: &mut dyn Observer<S, R>) -> Step {
+        let it = st.iteration();
+        if it >= self.next_redraw {
+            self.redraw(it);
+        }
+        let cur = st.current();
+        let p = cur.as_slice();
+        let (n, best) = (self.n, st.best().cost());
+        let mut retained = None;
+        let (mut min_delta, mut already_aspired) = (S::Cost::max_value(), false);
+        for i in 0..n {
+            for j in i + 1..n {
+                let delta = cur.delta_of(&Swap { i, j });
+                let (authorized, long_term) = self.classify(p, i, j, it as i64);
+                let aspired = long_term || st.is_better(cur.cost() + delta, best);
+                // Taillard's rule: the first aspired move is taken whatever its cost; among
+                // several aspired moves, the best; otherwise the best authorized move.
+                let take = if aspired {
+                    !already_aspired || delta < min_delta
+                } else {
+                    !already_aspired && authorized && delta < min_delta
+                };
+                if take {
+                    retained = Some((i, j, delta));
+                    min_delta = delta;
+                    already_aspired |= aspired;
+                }
+            }
+        }
+        let Some((i, j, delta)) = retained else {
+            return Step::Stuck; // every move tabu, none aspired
+        };
+        self.t[i * n + p[i]] = it as i64 + self.current_tenure; // p[i] leaves i
+        self.t[j * n + p[j]] = it as i64 + self.current_tenure; // p[j] leaves j
+        st.commit(&Swap { i, j }, delta, obs)
+    }
+
+    fn start(&mut self, st: &mut State<S, R>) {
+        let n = st.current().size();
+        self.prepare(n);
+        self.rng = DefaultRng::seed_from_u64(st.rng().next_u64());
+        self.next_redraw = 0; // re-draw the tenure at the first move
+    }
+}
+
+// ------------------------------------------------------ very large neighborhood
+
+/// Destroy: pick `k` random positions. Repair: try every other arrangement of
+/// their elements (k! − 1 of them, by Heap's algorithm: one swap per
+/// neighbor) and move to the best one, even if it is worse than the current
+/// arrangement: like a tabu search, the acceptance rule of the
+/// [`LargeNeighborhoodSearch`](crate::LargeNeighborhoodSearch) decides
+/// (`Improving` gives a descent, `LateAcceptance` or `SimulatedAnnealing` can
+/// escape local optima). The neighborhood has C(n, k)·k! members; one rebuild
+/// explores k! of them exactly.
+///
+/// Each neighbor costs one swap delta and one swap: use a model whose swap is
+/// cheap (an O(n) delta and O(1) swap; not a delta matrix updated in O(n²)).
+/// k = 7 is 5,040 neighbors per rebuild, k = 8 is 40,320.
+pub struct BestRearrangement {
+    pub k: usize,
+    positions: Vec<usize>,
+}
+
+impl BestRearrangement {
+    pub fn new(k: usize) -> Self {
+        assert!(k >= 2, "rearranging fewer than 2 positions changes nothing");
+        BestRearrangement {
+            k,
+            positions: Vec::new(),
+        }
+    }
+}
+
+impl<S: Permutation> Rebuild<S> for BestRearrangement {
+    fn rebuild(&mut self, s: &mut Evaluated<S>, rng: &mut dyn RngCore) {
+        let n = s.size();
+        let k = self.k.min(n);
+        // destroy: k distinct random positions (partial Fisher-Yates)
+        self.positions.clear();
+        self.positions.extend(0..n);
+        for i in 0..k {
+            let j = rng.random_range(i..n);
+            self.positions.swap(i, j);
+        }
+        self.positions.truncate(k);
+        let pos = &self.positions;
+
+        // repair: Heap's algorithm visits the k! − 1 other arrangements, one swap apart
+        let mut best_cost = S::Cost::max_value();
+        let mut best: Vec<usize> = pos.iter().map(|&q| s.as_slice()[q]).collect();
+        let mut c = vec![0usize; k];
+        let mut i = 1;
+        while i < k {
+            if c[i] < i {
+                let a = if i % 2 == 0 { 0 } else { c[i] };
+                s.apply(&Swap::new(pos[a], pos[i]));
+                if s.cost() < best_cost {
+                    best_cost = s.cost();
+                    for (t, &q) in pos.iter().enumerate() {
+                        best[t] = s.as_slice()[q];
+                    }
+                }
+                c[i] += 1;
+                i = 1;
+            } else {
+                c[i] = 0;
+                i += 1;
+            }
+        }
+
+        // move to the best arrangement (at most k − 1 swaps)
+        for t in 0..k {
+            let want = best[t];
+            if s.as_slice()[pos[t]] != want {
+                let u = (t + 1..k)
+                    .find(|&u| s.as_slice()[pos[u]] == want)
+                    .expect("element in the subset");
+                s.apply(&Swap::new(pos[t], pos[u]));
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------- crossover
+
+/// Uniform crossover for permutations (as in Merz & Freisleben's memetic
+/// algorithm for the QAP): positions where both parents agree keep their
+/// element; every other position, visited in random order, takes the element
+/// of one parent chosen at random if it is still free; the remaining positions
+/// get the remaining elements at random.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UniformCrossover;
+
+impl<S: Permutation> Crossover<S> for UniformCrossover {
+    fn cross(&mut self, a: &S, b: &S, child: &mut S, rng: &mut dyn RngCore) {
+        let (pa, pb) = (a.as_slice(), b.as_slice());
+        let n = pa.len();
+        let mut target = vec![usize::MAX; n];
+        let mut used = vec![false; n];
+        let mut open = Vec::new();
+        for i in 0..n {
+            if pa[i] == pb[i] {
+                target[i] = pa[i];
+                used[pa[i]] = true;
+            } else {
+                open.push(i);
+            }
+        }
+        for t in (1..open.len()).rev() {
+            open.swap(t, rng.random_range(0..=t));
+        }
+        let mut empty = Vec::new();
+        for &i in &open {
+            let (first, second) = if rng.random::<bool>() {
+                (pa[i], pb[i])
+            } else {
+                (pb[i], pa[i])
+            };
+            if !used[first] {
+                target[i] = first;
+                used[first] = true;
+            } else if !used[second] {
+                target[i] = second;
+                used[second] = true;
+            } else {
+                empty.push(i);
+            }
+        }
+        let mut free: Vec<usize> = (0..n).filter(|&e| !used[e]).collect();
+        for t in (1..free.len()).rev() {
+            free.swap(t, rng.random_range(0..=t));
+        }
+        for (&i, e) in empty.iter().zip(free) {
+            target[i] = e;
+        }
+        rearrange(child, &target);
+    }
 }

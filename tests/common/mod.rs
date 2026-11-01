@@ -24,8 +24,8 @@ impl Model for Sort {
     }
 }
 impl Permutation for Sort {
-    fn size(&self) -> usize {
-        self.0.len()
+    fn as_slice(&self) -> &[usize] {
+        &self.0
     }
     fn swap(&mut self, i: usize, j: usize) {
         self.0.swap(i, j)
@@ -47,8 +47,8 @@ impl Model for SortFull {
     }
 }
 impl Permutation for SortFull {
-    fn size(&self) -> usize {
-        self.0.len()
+    fn as_slice(&self) -> &[usize] {
+        &self.0
     }
     fn swap(&mut self, i: usize, j: usize) {
         self.0.swap(i, j)
@@ -66,8 +66,8 @@ impl Model for SortBuggy {
     }
 }
 impl Permutation for SortBuggy {
-    fn size(&self) -> usize {
-        self.0.len()
+    fn as_slice(&self) -> &[usize] {
+        &self.0
     }
     fn swap(&mut self, i: usize, j: usize) {
         self.0.swap(i, j)

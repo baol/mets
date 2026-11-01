@@ -221,8 +221,8 @@ impl Model for QapPlain<'_> {
 }
 
 impl Permutation for QapPlain<'_> {
-    fn size(&self) -> usize {
-        self.p.len()
+    fn as_slice(&self) -> &[usize] {
+        &self.p
     }
     fn swap(&mut self, i: usize, j: usize) {
         self.p.swap(i, j);
@@ -263,8 +263,8 @@ impl Model for QapTaillard<'_> {
 }
 
 impl Permutation for QapTaillard<'_> {
-    fn size(&self) -> usize {
-        self.p.len()
+    fn as_slice(&self) -> &[usize] {
+        &self.p
     }
     #[inline]
     fn swap_delta(&self, i: usize, j: usize) -> Option<C> {

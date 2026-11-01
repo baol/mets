@@ -20,14 +20,21 @@ src/termination.rs    MaxIterations, NoImprovement, Target, TimeLimit, stop_when
 src/local_search.rs   best / first improvement descent
 src/tabu.rs           TabuSearch, TabuAttr, DenseAttr, RecencyTabu, DenseTabu, aspiration
 src/stochastic.rs     StochasticSearch + SA, LAHC, RRT, TA, Great Deluge, …
-src/ils.rs            IteratedSearch (ILS, iterated tabu search, random restarts)
-src/perm.rs           permutation problems: Swap, SwapNeighborhood, perturb, shuffle
+src/ils.rs            IteratedSearch (ILS, iterated tabu search, random restarts), Adaptive
+src/lns.rs            LargeNeighborhoodSearch, Rebuild (destroy + repair)
+src/population.rs     Memetic (population + crossover), Crossover
+src/parallel.rs       run_many (independent runs on threads), Cancel
+src/perm.rs           permutation problems: Swap, SwapNeighborhood, perturb, shuffle,
+                      RobustTabuSearch, BestRearrangement, UniformCrossover, rearrange
 src/check.rs          check::deltas, for testing delta formulas
 examples/subset_sum   tutorial port (tabu search)
 examples/qap          qap/main_ts.cc + qap/main.cc ports, plus SA/LAHC/RRT/ILS
+examples/qap_advanced memetic / restarts / LNS solvers assembled from library pieces
+examples/common/qap   QAP instance, models and QAPLIB sweep shared by both QAP examples
 examples/vcp          vcp/vcp.cc port (TabuCol-like iterated tabu search)
 tests/                every algorithm, full-evaluation models, delta checks,
-                      nesting and scopes, dyn Search, a user-defined VND
+                      nesting and scopes, dyn Search, a user-defined VND,
+                      LNS, memetic, robust tabu, parallel runs
 ```
 
 ```bash
@@ -608,6 +615,9 @@ iteration `step` and observer calls are indirect. The per-move work inside
 | iterated tabu search | `IteratedSearch::new(TabuSearch…, NoImprovement::new(k), perturb, Improving)` |
 | random restarts (RR-…) | `IteratedSearch::new(inner, stop, re_initialise, Always)` |
 | LSMC / SA-ILS | `IteratedSearch` with `SimulatedAnnealing` as acceptance |
+| robust tabu search (Taillard) | `perm::RobustTabuSearch::new()` (§3.13) |
+| large neighborhood search | `LargeNeighborhoodSearch::new(rebuild, acceptance)` (§3.11) |
+| memetic algorithm | `Memetic::new(inner, inner_stop, init, crossover, size)` (§3.12) |
 | VND, or anything new | implement `Search::step` (§3.10) |
 
 The `Acceptance` trait is shared by the stochastic searches and the ILS
@@ -768,6 +778,97 @@ impl<S: Model, R: Rng, N1: Neighborhood<S>, N2: Neighborhood<S>> Search<S, R> fo
 The algorithm doesn't touch the iteration counter or the best solution, and it
 can't bypass the cost cache. `commit` and the runner handle all three.
 
+### 3.11 Large neighborhood search
+
+A large neighborhood is explored by an operator, not enumerated: destroy part
+of a copy of the solution and repair it. `LargeNeighborhoodSearch` does one
+rebuild per iteration and lets any `Acceptance` rule (§3.7) decide:
+
+```rust
+pub trait Rebuild<S: Model> {
+    fn rebuild(&mut self, s: &mut Evaluated<S>, rng: &mut dyn RngCore);   // in place
+}
+// rebuild_with(|s: &mut Evaluated<P>, rng| ..) for closures
+
+LargeNeighborhoodSearch::new(perm::BestRearrangement::new(5), LateAcceptance::new(10 * n))
+    .runner(&mut st).until(MaxIterations::new(1_000_000)).run();
+```
+
+The rebuilt candidate is a whole solution, not a `Move`, so it enters the
+state through `State::replace_current(&candidate, obs)`, which records the
+best and notifies like `commit` (in debug builds it checks the candidate's
+cached cost against a full evaluation). The search keeps one candidate buffer
+and reuses it with `clone_from`.
+
+### 3.12 Memetic search: crossover instead of restarts
+
+`Memetic` replaces the random restarts of an outer `IteratedSearch` with
+recombination. It is a steady-state population of `size` solutions:
+
+1. A starting point: while the population is filling, `init` (e.g. a
+   shuffle); then a `Crossover` of two random members.
+2. The inner search improves it in its own best-scope, exactly as an
+   `IteratedSearch` run (§3.9).
+3. The result replaces the worst member if it is better and its cost is not
+   already present (a cheap duplicate test, which keeps the population
+   diverse without requiring `PartialEq` on the model).
+4. After `renew_after(k)` steps without an insertion, every member but the
+   best is replaced by fresh solutions.
+
+```rust
+pub trait Crossover<S: Model> {
+    /// `child` holds a copy of `a`; the library re-evaluates it afterwards.
+    fn cross(&mut self, a: &S, b: &S, child: &mut S, rng: &mut dyn RngCore);
+}
+// crossover_with(|a: &P, b, child, rng| ..) for closures
+
+Memetic::new(iterated_tabu, NoImprovement::new(20), perturb_with(|s: &mut Evaluated<P>, rng| shuffle(s, rng)),
+             perm::UniformCrossover, 10)
+    .renew_after(20)
+    .runner(&mut st).until(MaxIterations::new(50)).run();
+```
+
+`Memetic` is a `Search`, so it nests and runs like any other.
+
+### 3.13 Permutation problems
+
+`perm::Permutation` exposes the permutation itself (`as_slice`, required;
+`size` is provided), so generic components can read which element sits
+where. Changes still go through `swap`, which keeps a model's incremental
+structures (a delta matrix) valid.
+
+| component | what it is |
+|---|---|
+| `RobustTabuSearch` | Taillard's robust tabu search on swaps: tabu attributes on assignments (element at position), tenure re-drawn in [0.9n, 1.1n], a long-term aspiration that *forces* moves re-creating assignments unseen for 5n² iterations. Its memory persists across runs, so as the inner search of an iterated or memetic search it remembers the whole history. |
+| `BestRearrangement` | A very large neighborhood for LNS: k random positions, all k! − 1 *other* arrangements of their elements tried by Heap's algorithm (one swap per neighbor), move to the best even if worse. C(n, k)·k! neighbors in all. |
+| `UniformCrossover` | Merz & Freisleben's crossover: common assignments kept, other positions take a parent's element at random when free, the rest filled at random. |
+| `adaptive_perturbation(n)` | `perturb` with `ils::Adaptive` strength: from n/10 swaps, growing while the incumbent is unchanged, reset on change. `Adaptive` itself takes any `(s, strength, rng)` operation. |
+| `rearrange(s, target)` | Move to any target permutation with at most n − 1 swaps (used by the crossover). |
+
+`RobustTabuSearch` is its own `Search`, not a `TabuList` for `TabuSearch`:
+a tabu list can only make moves admissible or not, while RoTS's long-term
+aspiration forces a worsening move. `BestRearrangement` never keeps the
+current arrangement: if it could, a rebuild could never worsen the solution,
+every acceptance rule would degenerate to a descent, and the search would stop
+at the first local optimum of the neighborhood (measured: 2.35% on `tai60a`,
+unchanged from 20,000 to 100,000 steps).
+
+### 3.14 Parallel runs
+
+```rust
+let results = parallel::run_many(runs, jobs, |run, cancel| {
+    let mut st = State::new(model(run), run);               // the run index seeds everything
+    search.runner(&mut st).until(MaxIterations::new(50).or(cancel)).run();
+    st.global_best().cost()
+});                                                         // Vec<(run, result)>, in run order
+```
+
+Each run owns its state and seed, so the results don't depend on the number of
+threads. `&Cancel` is a termination criterion: one run calling
+`cancel.cancel()` (e.g. on reaching a target cost) stops the others, inner
+searches included if they observe it too, and runs not started yet are
+skipped.
+
 ---
 
 ## 4. Performance
@@ -859,6 +960,41 @@ the direction of the cost formula, but 8 list its inverse (`esc128`,
 checks both directions, uses the lower of the header and the verified cost,
 and prints a note when they disagree.
 
+### Advanced QAP solvers
+
+`examples/qap_advanced.rs` assembles three solvers from §3.11–3.14, on the
+symmetric fast path of the shared QAP models (2 products per delta term
+instead of 4 for symmetric, zero-diagonal instances: 20.9 instead of 39 µs per
+full-neighborhood tabu iteration on `tai60a`). Each run below is 4
+independent runs on 4 threads, best of them; times are wall-clock.
+
+| instance | restarts of ITS(RoTS) | memetic, population 10 | memetic, population 5 |
+|---|---|---|---|
+| sko72 | 0.01% (36.8 s) | **0.00%** (33.2 s) | **0.00%** (25.4 s) |
+| sko81 | 0.01% (53.1 s) | 0.01% (44.7 s) | 0.01% (37.3 s) |
+| tho40 | 0.00% (10.4 s) | 0.00% (8.2 s) | — |
+| lipa90a | 0.00% (89.1 s) | 0.00% (80.2 s) | — |
+| tai50a | **0.57%** (12.5 s) | 0.69% (12.0 s) | 0.61% (11.7 s) |
+| tai60a | **0.62%** (18.1 s) | 0.77% (17.2 s) | — |
+
+* Same budget for both: 50 inner improvement runs per run (restarts: 50
+  restarts; memetic: 10 random starts, then 40 children).
+* Crossover helps on the structured `sko` instances, reaching `sko72`'s
+  best-known value, and is a little faster. Restarts stay better on the
+  uniform random `tai*a` instances, which have little common structure for a
+  child to inherit.
+* Large neighborhood search with `BestRearrangement` is correct but not
+  competitive on the QAP: on `tai60a` the best setting found (k = 5, late
+  acceptance over 10n iterations, 1.5 million rebuilds per run) reaches 1.68%
+  in 17 s, against 0.62% for tabu restarts in 18 s. Larger k (6, 7) and
+  shorter acceptance histories were worse at the same time. This matches the
+  literature, where tabu search on swaps is the strongest local method for
+  the QAP.
+* Compared with the `QAPLIB.md` setup (`qap`, 200 restarts of position-pair
+  tabu search), restarts of robust tabu search reach better costs on 9 of 12
+  hard instances at about the same CPU time, including `tai100b`'s
+  best-known value.
+
 The C++ benchmark source is not committed. It is a 40-line program that
 includes `metslib/mets.hh`, and can be added to METSlib's `test/` if useful.
 
@@ -879,6 +1015,9 @@ which the compiler or ergonomics forced:
 | Aspiration implemented for closures | `BestEver`, `NoAspiration`, or implement the trait | `allows` is generic over the RNG type, which a closure can't be. |
 | `st.current()` and `st.rng()` used together | `st.current_and_rng()` | Borrowing rules: an immutable and a mutable borrow of the state at once. |
 | `Neighborhood` implemented for an RNG-owning `Sampled { .. }` | `Sampled::new(sampler, k)`, seeded in `Neighborhood::start` | Constructor style and reproducibility. |
+| `Permutation` with `size()` and `swap()` | `as_slice()` required, `size()` provided | Robust tabu search and the crossover need to read which element is at each position. |
+| A rearrangement neighborhood that keeps the best arrangement, current included | `BestRearrangement` always moves to the best *other* arrangement | Otherwise a rebuild never worsens, every acceptance rule becomes a descent, and LNS stops at the first local optimum (§3.13). |
+| Robust tabu search as a `TabuList` for `TabuSearch` | its own `Search` (`perm::RobustTabuSearch`) | Its long-term aspiration forces worsening moves, which a tabu list cannot express. |
 
 ---
 
@@ -901,6 +1040,13 @@ which the compiler or ergonomics forced:
   only the SA-style acceptance rules would use the `f64` projection. Decide
   between shipping a `Lexicographic<H, S>` type and narrowing `Cost` to
   `Add + Sub + Neg + Zero + Bounded + ToPrimitive`.
+* **Hybrid uses of large neighborhoods.** On the QAP, `BestRearrangement`
+  in an LNS loses to tabu search (§4). It may do better as an intensification
+  step (applied to the best solution of each inner run) or as the
+  perturbation of an iterated search; neither is measured yet.
+* **Memetic diversity.** The duplicate test compares costs only. A distance
+  (e.g. number of differing positions) would keep the population more diverse
+  on instances with many equal-cost solutions.
 * **Reactive tabu search**: observers get `&State` only. Changing the tenure
   from an observer would need `&mut` access to the algorithm. A user loop
   that calls `step` directly already allows it.
