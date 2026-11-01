@@ -18,6 +18,9 @@
 //! options:
 //!   --seconds S   time budget per run (default 1)
 //!   --seeds K     runs per method (default 3; --qaplib uses 1)
+//!   --restarts R  --qaplib only: R random restarts per instance, every inner
+//!                 search stopping on no-improvement (no time limit unless --seconds)
+//!   --jobs J      --qaplib only: instances solved in parallel (default: all cores)
 //!   --markdown    --qaplib only: print the results as a Markdown table
 //!
 //! QAPLIB: https://qaplib.mgi.polymtl.ca/ (instances `*.dat`, solutions `*.sln`).
@@ -348,7 +351,10 @@ struct Run<'a> {
     inst: &'a Instance,
     start: Vec<usize>,
     seed: u64,
+    /// Wall-clock limit (`Duration::MAX`: none).
     budget: Duration,
+    /// restarts(ITS) only: number of random restarts (`None`: until the budget).
+    restarts: Option<u64>,
 }
 
 /// Stops when the state's clock exceeds the budget. Used for inner runs too,
@@ -467,7 +473,10 @@ fn restarts_its(r: &Run) -> RunResult {
         Always,
     );
     let mut st = State::new(QapTaillard::new(r.inst, r.start.clone()), r.seed);
-    restarts.runner(&mut st).until(deadline(r.budget)).run();
+    restarts
+        .runner(&mut st)
+        .until(MaxIterations::new(r.restarts.unwrap_or(u64::MAX)).or(deadline(r.budget)))
+        .run();
     RunResult {
         best: st.best().cost(),
         evals: count.get(),
@@ -562,6 +571,10 @@ fn gap(cost: C, best_known: C) -> f64 {
 struct Options {
     budget: Duration,
     seeds: u64,
+    /// `--qaplib` only: random restarts per run instead of a time budget.
+    restarts: Option<u64>,
+    /// `--qaplib` only: instances solved in parallel.
+    jobs: usize,
     /// `--qaplib` only: print a Markdown table.
     markdown: bool,
 }
@@ -601,6 +614,7 @@ fn compare(name: &str, inst: &Instance, best_known: Option<BestKnown>, opt: &Opt
                 start: random_start(inst.n, seed),
                 seed,
                 budget: opt.budget,
+                restarts: None,
             };
             let t = Instant::now();
             let res = method(&run);
@@ -636,6 +650,42 @@ struct SweepRow {
     found: C,
     best_known: Option<C>,
     note: Option<String>,
+    secs: f64,
+}
+
+fn solve_instance(data: &Path, soln: &Path, name: &str, opt: &Options) -> Result<SweepRow, String> {
+    let inst = Instance::read(&data.join(format!("{name}.dat")))?;
+    let sln = soln.join(format!("{name}.sln"));
+    let (best_known, note) = if sln.exists() {
+        match read_sln(&sln, &inst) {
+            Ok(b) => (Some(b.value), b.note),
+            Err(e) => (None, Some(e)),
+        }
+    } else {
+        (None, Some("no published solution".into()))
+    };
+    let t = Instant::now();
+    let found = (1..=opt.seeds)
+        .map(|seed| {
+            let run = Run {
+                inst: &inst,
+                start: random_start(inst.n, seed),
+                seed,
+                budget: opt.budget,
+                restarts: opt.restarts,
+            };
+            restarts_its(&run).best
+        })
+        .min()
+        .unwrap();
+    Ok(SweepRow {
+        name: name.into(),
+        n: inst.n,
+        found,
+        best_known,
+        note,
+        secs: t.elapsed().as_secs_f64(),
+    })
 }
 
 fn sweep(data: &Path, soln: &Path, opt: &Options) {
@@ -650,69 +700,63 @@ fn sweep(data: &Path, soln: &Path, opt: &Options) {
         })
         .collect();
     names.sort();
-    let setup = format!(
-        "restarts(ITS(tabu)), {} s per instance, best of {} seed(s)",
-        opt.budget.as_secs_f64(),
-        opt.seeds
-    );
+    let stop = match opt.restarts {
+        Some(r) => format!(
+            "{r} random restarts, each an iterated tabu search (tabu runs stop after 200 iterations \
+             without improvement, the iterated search after 20 perturbations without improvement)"
+        ),
+        None => format!("{} s per instance", opt.budget.as_secs_f64()),
+    };
+    let setup = format!("restarts(ITS(tabu)), {stop}, best of {} seed(s)", opt.seeds);
+
+    // solve in parallel, `jobs` instances at a time, largest files first so the
+    // long runs don't start last; print in name order
+    let size =
+        |name: &String| std::fs::metadata(data.join(format!("{name}.dat"))).map_or(0, |m| m.len());
+    let mut order: Vec<usize> = (0..names.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(size(&names[i])));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..opt.jobs.max(1) {
+            scope.spawn(|| loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&i) = order.get(k) else { break };
+                let name = &names[i];
+                match solve_instance(data, soln, name, opt) {
+                    Ok(row) => {
+                        eprintln!("{:<10} {:>12} {:>8.1}s", row.name, row.found, row.secs);
+                        results.lock().unwrap().push((i, row));
+                    }
+                    Err(e) => eprintln!("{name}: skipped: {e}"),
+                }
+            });
+        }
+    });
+    let mut rows = results.into_inner().unwrap();
+    rows.sort_by_key(|(i, _)| *i);
+    let rows: Vec<SweepRow> = rows.into_iter().map(|(_, r)| r).collect();
+
     if !opt.markdown {
         println!("{setup}");
         println!(
-            "{:<10} {:>4} {:>12} {:>12} {:>8}  note",
-            "instance", "n", "found", "best known", "gap"
+            "{:<10} {:>4} {:>12} {:>12} {:>8} {:>8}  note",
+            "instance", "n", "found", "best known", "gap", "time"
         );
-    }
-    let mut rows = Vec::new();
-    for name in names {
-        let inst = match Instance::read(&data.join(format!("{name}.dat"))) {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("{name}: skipped: {e}");
-                continue;
-            }
-        };
-        let sln = soln.join(format!("{name}.sln"));
-        let (best_known, note) = if sln.exists() {
-            match read_sln(&sln, &inst) {
-                Ok(b) => (Some(b.value), b.note),
-                Err(e) => (None, Some(e)),
-            }
-        } else {
-            (None, Some("no published solution".into()))
-        };
-        let found = (1..=opt.seeds)
-            .map(|seed| {
-                restarts_its(&Run {
-                    inst: &inst,
-                    start: random_start(inst.n, seed),
-                    seed,
-                    budget: opt.budget,
-                })
-                .best
-            })
-            .min()
-            .unwrap();
-        let row = SweepRow {
-            name,
-            n: inst.n,
-            found,
-            best_known,
-            note,
-        };
-        if !opt.markdown {
+        for row in &rows {
             let (bk, g) = match row.best_known {
                 Some(b) => (b.to_string(), format!("{:.2}%", gap(row.found, b))),
                 None => ("-".into(), "-".into()),
             };
             println!(
-                "{:<10} {:>4} {:>12} {bk:>12} {g:>8}  {}",
+                "{:<10} {:>4} {:>12} {bk:>12} {g:>8} {:>7.1}s  {}",
                 row.name,
                 row.n,
                 row.found,
+                row.secs,
                 row.note.as_deref().unwrap_or("")
             );
         }
-        rows.push(row);
     }
 
     // summary by family (instances with a best-known value)
@@ -739,19 +783,23 @@ fn sweep(data: &Path, soln: &Path, opt: &Options) {
 
     if opt.markdown {
         println!("{setup}: {} instances, best-known value reached on {reached} of the {with_bk} that have one.\n", rows.len());
-        println!("| Instance | n | Found | Best known | Gap |");
-        println!("|---|---:|---:|---:|---:|");
+        println!("| Instance | n | Found | Best known | Gap | Time (s) |");
+        println!("|---|---:|---:|---:|---:|---:|");
         for r in &rows {
             let mark = if r.note.is_some() { " *" } else { "" };
             match r.best_known {
                 Some(b) => println!(
-                    "| {}{mark} | {} | {} | {b} | {:.2}% |",
+                    "| {}{mark} | {} | {} | {b} | {:.2}% | {:.1} |",
                     r.name,
                     r.n,
                     r.found,
-                    gap(r.found, b)
+                    gap(r.found, b),
+                    r.secs
                 ),
-                None => println!("| {}{mark} | {} | {} | — | — |", r.name, r.n, r.found),
+                None => println!(
+                    "| {}{mark} | {} | {} | — | — | {:.1} |",
+                    r.name, r.n, r.found, r.secs
+                ),
             }
         }
         let notes: Vec<&SweepRow> = rows.iter().filter(|r| r.note.is_some()).collect();
@@ -849,13 +897,20 @@ fn main() {
         args.drain(i..(i + 2).min(args.len()));
         v
     };
-    let seconds: f64 = take("--seconds")
-        .map(|s| s.parse().expect("--seconds S"))
-        .unwrap_or(1.0);
+    let seconds: Option<f64> = take("--seconds").map(|s| s.parse().expect("--seconds S"));
+    let restarts: Option<u64> = take("--restarts").map(|s| s.parse().expect("--restarts R"));
+    let jobs: usize = take("--jobs")
+        .map(|s| s.parse().expect("--jobs J"))
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
     let seeds: Option<u64> = take("--seeds").map(|s| s.parse().expect("--seeds K"));
     let bench_iters: Option<u64> = take("--bench").map(|s| s.parse().expect("--bench ITERS"));
     let qaplib = args.iter().position(|a| a == "--qaplib");
-    let budget = Duration::from_secs_f64(seconds);
+    // with --restarts and no --seconds, runs are not time-limited
+    let budget = match (seconds, restarts) {
+        (Some(s), _) => Duration::from_secs_f64(s),
+        (None, Some(_)) => Duration::MAX,
+        (None, None) => Duration::from_secs(1),
+    };
 
     if let Some(i) = qaplib {
         let (data, soln) = (
@@ -868,6 +923,8 @@ fn main() {
             &Options {
                 budget,
                 seeds: seeds.unwrap_or(1),
+                restarts,
+                jobs,
                 markdown,
             },
         );
@@ -875,6 +932,8 @@ fn main() {
     let opt = Options {
         budget,
         seeds: seeds.unwrap_or(3),
+        restarts: None,
+        jobs: 1,
         markdown,
     };
     match args.first() {
