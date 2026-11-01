@@ -32,6 +32,7 @@ tests/                every algorithm, full-evaluation models, delta checks,
 
 ```bash
 cargo test && cargo run --release --example qap
+cargo run --release --example qap -- tai60a.dat tai60a.sln   # a QAPLIB instance (not included)
 ```
 
 ---
@@ -812,6 +813,45 @@ LTO. Times are µs per iteration on a shared cloud VM, two runs each.
 * **Debug builds are much slower**, by design: every committed move is
   checked with two full evaluations. VCP with n = 60 runs about 18 k
   iterations/s in debug and 1.5 M/s in release.
+
+### Solution quality on QAPLIB
+
+`qap --qaplib DATA SOLN --seconds 1` runs the iterated tabu search of
+`qap/main.cc` (random restarts of a tabu search with random tenure,
+Taillard model) for 1 s on each of the 128 QAPLIB instances that have a
+published solution, one seed, and compares with the best-known value:
+
+| family | instances | best known reached | mean gap | max gap |
+|---|---|---|---|---|
+| bur, els, esc, had, kra, nug, rou, scr, ste | 54 | 54 | 0.00% | 0.00% |
+| chr | 14 | 12 | 0.36% | 3.13% |
+| lipa | 16 | 9 | 2.66% | 19.96% |
+| sko | 13 | 1 | 0.43% | 0.89% |
+| tai | 26 | 12 | 0.67% | 2.84% |
+| tho | 3 | 1 | 0.35% | 0.98% |
+| wil | 2 | 0 | 0.36% | 0.59% |
+| **all** | **128** | **89** | | |
+
+* The two large outliers, `lipa80b` and `lipa90b` (~20%), are budget-bound:
+  with 10 s both reach the optimum. The `lipa*b` instances have a deep
+  deceptive basin that restarts eventually escape.
+* The large `tai*a`, `tai*b` and `sko` instances are where a 1 s budget
+  shows; these are the hard QAPLIB classes, where state-of-the-art methods
+  need much longer runs.
+* On `tai60a` with the same 1 s budget and 3 seeds (`qap tai60a.dat
+  tai60a.sln`), mean gaps are: restarts(ITS) 1.33%, full-neighborhood tabu
+  1.63%, simulated annealing 1.89%, ILS 2.30%, late acceptance 2.67%,
+  record-to-record travel 2.68%, sampled tabu (`main_ts.cc`) 2.96%. Tabu
+  search evaluates about 4·10⁷ moves/s with the Taillard model; the
+  sampling methods about 3–4·10⁶ with the O(n) delta.
+
+The published solutions need care. Most `.sln` files list the permutation in
+the direction of the cost formula, but 8 list its inverse (`esc128`,
+`kra30a`, `kra30b`, `ste36c`, `tai60a`, `tai80a`, `tho150`, `tho30`).
+`kra32`'s header says 88,900 while its own permutation costs 88,700, and
+`tai40a`'s permutation is invalid (position 40 is missing). The example
+checks both directions, uses the lower of the header and the verified cost,
+and prints a note when they disagree.
 
 The C++ benchmark source is not committed. It is a 40-line program that
 includes `metslib/mets.hh`, and can be added to METSlib's `test/` if useful.

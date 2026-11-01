@@ -47,9 +47,22 @@ it against the full evaluation.
 
 ```bash
 cargo run --release --example subset_sum   # tabu search (METSlib tutorial)
-cargo run --release --example qap          # QAP: tabu, iterated tabu, SA, LAHC, RRT, ILS
 cargo run --release --example vcp          # graph colouring, TabuCol-like iterated tabu
+cargo run --release --example qap          # QAP: 7 methods, same time budget, 3 seeds
 ```
+
+The QAP example also reads [QAPLIB](https://qaplib.mgi.polymtl.ca/)
+instances (not included in this repository) and reports the gap to the
+best-known value:
+
+```bash
+cargo run --release --example qap -- tai60a.dat tai60a.sln --seconds 2 --seeds 5
+cargo run --release --example qap -- --qaplib path/to/qapdata path/to/qapsoln
+```
+
+With 1 s per instance, its iterated tabu search reaches the best-known value
+on 89 of the 128 QAPLIB instances that have a published solution (see
+[`DESIGN.md`](DESIGN.md) §4).
 
 ## Documentation
 
