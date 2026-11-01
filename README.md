@@ -57,12 +57,13 @@ best-known value:
 
 ```bash
 cargo run --release --example qap -- tai60a.dat tai60a.sln --seconds 2 --seeds 5
-cargo run --release --example qap -- --qaplib path/to/qapdata path/to/qapsoln
+cargo run --release --example qap -- --qaplib path/to/qapdata path/to/qapsoln --restarts 200
 ```
 
-With 1 s per instance, its iterated tabu search reaches the best-known value
-on 88 of the 128 QAPLIB instances that have a published solution: see
-[`QAPLIB.md`](QAPLIB.md) for every instance.
+With 200 random restarts per instance, its iterated tabu search reaches the
+best-known value on 106 of the 128 QAPLIB instances that have a published
+solution, and stays within 0.9% on the others: see [`QAPLIB.md`](QAPLIB.md)
+for every instance.
 
 ## Documentation
 

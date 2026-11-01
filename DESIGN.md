@@ -816,33 +816,34 @@ LTO. Times are µs per iteration on a shared cloud VM, two runs each.
 
 ### Solution quality on QAPLIB
 
-`qap --qaplib DATA SOLN --seconds 1` runs the iterated tabu search of
-`qap/main.cc` (random restarts of a tabu search with random tenure,
-Taillard model) for 1 s on each of the 136 QAPLIB instances, one seed, and
-compares with the best-known value of the 128 that have a published
-solution. The per-instance table is in [`QAPLIB.md`](QAPLIB.md).
+`qap --qaplib DATA SOLN --restarts 200` runs the iterated tabu search of
+`qap/main.cc` on each of the 136 QAPLIB instances: 200 random restarts, each
+an iterated tabu search that stops after 20 perturbations without
+improvement, whose tabu runs (Taillard model, random tenure) stop after 200
+iterations without improvement. There is no time limit, so the results
+depend only on the seed and are reproducible. The per-instance table is in
+[`QAPLIB.md`](QAPLIB.md); the summary over the 128 instances with a
+published solution:
 
 | family | instances | best known reached | mean gap | max gap |
 |---|---|---|---|---|
-| bur, els, esc, had, kra, nug, rou, scr, ste | 54 | 54 | 0.00% | 0.00% |
-| chr | 14 | 12 | 0.36% | 3.13% |
-| lipa | 16 | 8 | 3.75% | 19.96% |
-| sko | 13 | 1 | 0.43% | 0.90% |
-| tai | 26 | 12 | 0.66% | 2.84% |
-| tho | 3 | 1 | 0.35% | 0.98% |
-| wil | 2 | 0 | 0.36% | 0.59% |
-| **all** | **128** | **88** | | |
+| bur, chr, els, esc, had, kra, nug, rou, scr, ste | 68 | 68 | 0.00% | 0.00% |
+| lipa | 16 | 15 | 0.03% | 0.43% |
+| sko | 13 | 4 | 0.04% | 0.10% |
+| tai | 26 | 17 | 0.13% | 0.90% |
+| tho | 3 | 2 | 0.03% | 0.10% |
+| wil | 2 | 0 | 0.05% | 0.08% |
+| **all** | **128** | **106** | | |
 
-* The large outliers are three `lipa*b` instances (17–20%). They are
-  budget-bound: `lipa60b` reached its optimum in another 1 s run, and with
-  10 s `lipa80b` and `lipa90b` do too. These instances have a deep deceptive
-  basin that restarts eventually escape.
-* Runs stop on a time limit, so results vary slightly between runs: a second
-  full run differed on 6 of 128 instances, and only `lipa60b` changed between
-  reaching the best-known value or not (89 vs 88).
-* The large `tai*a`, `tai*b` and `sko` instances are where a 1 s budget
-  shows; these are the hard QAPLIB classes, where state-of-the-art methods
-  need much longer runs.
+* The remaining gaps are on the hard classes: the uniform random `tai*a`
+  instances (up to 0.90% on `tai100a`) and the large `sko`, `tai*b`, `tho`
+  and `wil` instances (all under 0.3%).
+* The run took 3.6 CPU-hours on a shared VM, from under a second for small
+  instances to 43 minutes for `tai256c`.
+* With a 1 s budget per instance instead, the same search reaches the
+  best-known value on 88 instances, and the deceptive `lipa*b` instances can
+  stay ~20% above their optimum.
+
 * On `tai60a` with the same 1 s budget and 3 seeds (`qap tai60a.dat
   tai60a.sln`), mean gaps are: restarts(ITS) 1.33%, full-neighborhood tabu
   1.63%, simulated annealing 1.89%, ILS 2.30%, late acceptance 2.67%,
