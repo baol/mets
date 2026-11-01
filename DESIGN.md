@@ -818,23 +818,28 @@ LTO. Times are µs per iteration on a shared cloud VM, two runs each.
 
 `qap --qaplib DATA SOLN --seconds 1` runs the iterated tabu search of
 `qap/main.cc` (random restarts of a tabu search with random tenure,
-Taillard model) for 1 s on each of the 128 QAPLIB instances that have a
-published solution, one seed, and compares with the best-known value:
+Taillard model) for 1 s on each of the 136 QAPLIB instances, one seed, and
+compares with the best-known value of the 128 that have a published
+solution. The per-instance table is in [`QAPLIB.md`](QAPLIB.md).
 
 | family | instances | best known reached | mean gap | max gap |
 |---|---|---|---|---|
 | bur, els, esc, had, kra, nug, rou, scr, ste | 54 | 54 | 0.00% | 0.00% |
 | chr | 14 | 12 | 0.36% | 3.13% |
-| lipa | 16 | 9 | 2.66% | 19.96% |
-| sko | 13 | 1 | 0.43% | 0.89% |
-| tai | 26 | 12 | 0.67% | 2.84% |
+| lipa | 16 | 8 | 3.75% | 19.96% |
+| sko | 13 | 1 | 0.43% | 0.90% |
+| tai | 26 | 12 | 0.66% | 2.84% |
 | tho | 3 | 1 | 0.35% | 0.98% |
 | wil | 2 | 0 | 0.36% | 0.59% |
-| **all** | **128** | **89** | | |
+| **all** | **128** | **88** | | |
 
-* The two large outliers, `lipa80b` and `lipa90b` (~20%), are budget-bound:
-  with 10 s both reach the optimum. The `lipa*b` instances have a deep
-  deceptive basin that restarts eventually escape.
+* The large outliers are three `lipa*b` instances (17–20%). They are
+  budget-bound: `lipa60b` reached its optimum in another 1 s run, and with
+  10 s `lipa80b` and `lipa90b` do too. These instances have a deep deceptive
+  basin that restarts eventually escape.
+* Runs stop on a time limit, so results vary slightly between runs: a second
+  full run differed on 6 of 128 instances, and only `lipa60b` changed between
+  reaching the best-known value or not (89 vs 88).
 * The large `tai*a`, `tai*b` and `sko` instances are where a 1 s budget
   shows; these are the hard QAPLIB classes, where state-of-the-art methods
   need much longer runs.

@@ -13,11 +13,12 @@
 //!   qap [options]                       compare methods on a random Taillard-like instance (n = 60)
 //!   qap FILE.dat [FILE.sln] [options]   compare methods on a QAPLIB instance
 //!   qap --qaplib DATA_DIR SOLN_DIR [options]
-//!                                       iterated tabu search on every QAPLIB instance with a solution
+//!                                       iterated tabu search on every QAPLIB instance
 //!   qap FILE.dat --bench ITERS          the setup of the C++ METSlib benchmark (DESIGN.md §4)
 //! options:
 //!   --seconds S   time budget per run (default 1)
 //!   --seeds K     runs per method (default 3; --qaplib uses 1)
+//!   --markdown    --qaplib only: print the results as a Markdown table
 //!
 //! QAPLIB: https://qaplib.mgi.polymtl.ca/ (instances `*.dat`, solutions `*.sln`).
 
@@ -561,6 +562,8 @@ fn gap(cost: C, best_known: C) -> f64 {
 struct Options {
     budget: Duration,
     seeds: u64,
+    /// `--qaplib` only: print a Markdown table.
+    markdown: bool,
 }
 
 fn compare(name: &str, inst: &Instance, best_known: Option<BestKnown>, opt: &Options) {
@@ -626,6 +629,15 @@ fn compare(name: &str, inst: &Instance, best_known: Option<BestKnown>, opt: &Opt
     }
 }
 
+/// One instance of the sweep.
+struct SweepRow {
+    name: String,
+    n: usize,
+    found: C,
+    best_known: Option<C>,
+    note: Option<String>,
+}
+
 fn sweep(data: &Path, soln: &Path, opt: &Options) {
     let mut names: Vec<String> = std::fs::read_dir(data)
         .expect("cannot read the data directory")
@@ -638,34 +650,35 @@ fn sweep(data: &Path, soln: &Path, opt: &Options) {
         })
         .collect();
     names.sort();
-    println!(
-        "restarts(ITS(tabu)), {:.1} s per instance, {} seed(s); instances without a .sln are skipped",
+    let setup = format!(
+        "restarts(ITS(tabu)), {} s per instance, best of {} seed(s)",
         opt.budget.as_secs_f64(),
         opt.seeds
     );
-    println!(
-        "{:<10} {:>4} {:>12} {:>12} {:>8}  note",
-        "instance", "n", "best known", "found", "gap"
-    );
-    let mut families: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    if !opt.markdown {
+        println!("{setup}");
+        println!(
+            "{:<10} {:>4} {:>12} {:>12} {:>8}  note",
+            "instance", "n", "found", "best known", "gap"
+        );
+    }
+    let mut rows = Vec::new();
     for name in names {
-        let sln = soln.join(format!("{name}.sln"));
-        if !sln.exists() {
-            continue;
-        }
         let inst = match Instance::read(&data.join(format!("{name}.dat"))) {
             Ok(i) => i,
             Err(e) => {
-                println!("{name:<10} skipped: {e}");
+                eprintln!("{name}: skipped: {e}");
                 continue;
             }
         };
-        let bk = match read_sln(&sln, &inst) {
-            Ok(b) => b,
-            Err(e) => {
-                println!("{name:<10} skipped: {e}");
-                continue;
+        let sln = soln.join(format!("{name}.sln"));
+        let (best_known, note) = if sln.exists() {
+            match read_sln(&sln, &inst) {
+                Ok(b) => (Some(b.value), b.note),
+                Err(e) => (None, Some(e)),
             }
+        } else {
+            (None, Some("no published solution".into()))
         };
         let found = (1..=opt.seeds)
             .map(|seed| {
@@ -679,28 +692,101 @@ fn sweep(data: &Path, soln: &Path, opt: &Options) {
             })
             .min()
             .unwrap();
-        let g = gap(found, bk.value);
-        println!(
-            "{name:<10} {:>4} {:>12} {found:>12} {g:>7.2}%  {}",
-            inst.n,
-            bk.value,
-            bk.note.unwrap_or_default()
-        );
-        let family: String = name
-            .chars()
-            .take_while(|c| c.is_ascii_alphabetic())
-            .collect();
-        families.entry(family).or_default().push(g);
+        let row = SweepRow {
+            name,
+            n: inst.n,
+            found,
+            best_known,
+            note,
+        };
+        if !opt.markdown {
+            let (bk, g) = match row.best_known {
+                Some(b) => (b.to_string(), format!("{:.2}%", gap(row.found, b))),
+                None => ("-".into(), "-".into()),
+            };
+            println!(
+                "{:<10} {:>4} {:>12} {bk:>12} {g:>8}  {}",
+                row.name,
+                row.n,
+                row.found,
+                row.note.as_deref().unwrap_or("")
+            );
+        }
+        rows.push(row);
     }
-    println!("\nmean gap by family:");
-    for (family, gaps) in families {
-        let at_best = gaps.iter().filter(|&&g| g <= 0.0).count();
+
+    // summary by family (instances with a best-known value)
+    let mut families: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for r in &rows {
+        if let Some(b) = r.best_known {
+            let family: String = r
+                .name
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect();
+            families.entry(family).or_default().push(gap(r.found, b));
+        }
+    }
+    let with_bk = rows.iter().filter(|r| r.best_known.is_some()).count();
+    let reached = rows
+        .iter()
+        .filter(|r| r.best_known.is_some_and(|b| r.found <= b))
+        .count();
+    let improved: Vec<&SweepRow> = rows
+        .iter()
+        .filter(|r| r.best_known.is_some_and(|b| r.found < b))
+        .collect();
+
+    if opt.markdown {
+        println!("{setup}: {} instances, best-known value reached on {reached} of the {with_bk} that have one.\n", rows.len());
+        println!("| Instance | n | Found | Best known | Gap |");
+        println!("|---|---:|---:|---:|---:|");
+        for r in &rows {
+            let mark = if r.note.is_some() { " *" } else { "" };
+            match r.best_known {
+                Some(b) => println!(
+                    "| {}{mark} | {} | {} | {b} | {:.2}% |",
+                    r.name,
+                    r.n,
+                    r.found,
+                    gap(r.found, b)
+                ),
+                None => println!("| {}{mark} | {} | {} | — | — |", r.name, r.n, r.found),
+            }
+        }
+        let notes: Vec<&SweepRow> = rows.iter().filter(|r| r.note.is_some()).collect();
+        if !notes.is_empty() {
+            println!("\n\\* Notes:\n");
+            for r in notes {
+                println!("- `{}`: {}", r.name, r.note.as_deref().unwrap_or(""));
+            }
+        }
+        println!("\n| Family | Instances | Best known reached | Mean gap | Max gap |");
+        println!("|---|---:|---:|---:|---:|");
+    } else {
         println!(
-            "  {family:<5} {:>3} instances  mean {:>6.2}%  max {:>6.2}%  best known reached on {at_best}",
-            gaps.len(),
-            gaps.iter().sum::<f64>() / gaps.len() as f64,
-            gaps.iter().cloned().fold(f64::MIN, f64::max)
+            "\nbest-known value reached on {reached} of {with_bk} instances; mean gap by family:"
         );
+    }
+    for (family, gaps) in &families {
+        let at_best = gaps.iter().filter(|&&g| g <= 0.0).count();
+        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        let max = gaps.iter().cloned().fold(f64::MIN, f64::max);
+        if opt.markdown {
+            println!(
+                "| {family} | {} | {at_best} | {mean:.2}% | {max:.2}% |",
+                gaps.len()
+            );
+        } else {
+            println!(
+                "  {family:<5} {:>3} instances  mean {mean:>6.2}%  max {max:>6.2}%  best known reached on {at_best}",
+                gaps.len()
+            );
+        }
+    }
+    if !improved.is_empty() {
+        let list: Vec<String> = improved.iter().map(|r| r.name.clone()).collect();
+        println!("\nbetter than the best-known value: {}", list.join(", "));
     }
 }
 
@@ -755,6 +841,8 @@ fn bench(inst: &Instance, iters: u64) {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let markdown = args.iter().any(|a| a == "--markdown");
+    args.retain(|a| a != "--markdown");
     let mut take = |flag: &str| -> Option<String> {
         let i = args.iter().position(|a| a == flag)?;
         let v = args.get(i + 1).cloned();
@@ -780,12 +868,14 @@ fn main() {
             &Options {
                 budget,
                 seeds: seeds.unwrap_or(1),
+                markdown,
             },
         );
     }
     let opt = Options {
         budget,
         seeds: seeds.unwrap_or(3),
+        markdown,
     };
     match args.first() {
         None => {

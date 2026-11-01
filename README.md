@@ -61,8 +61,8 @@ cargo run --release --example qap -- --qaplib path/to/qapdata path/to/qapsoln
 ```
 
 With 1 s per instance, its iterated tabu search reaches the best-known value
-on 89 of the 128 QAPLIB instances that have a published solution (see
-[`DESIGN.md`](DESIGN.md) §4).
+on 88 of the 128 QAPLIB instances that have a published solution: see
+[`QAPLIB.md`](QAPLIB.md) for every instance.
 
 ## Documentation
 
