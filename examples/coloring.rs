@@ -21,6 +21,7 @@
 //!   --runs R       independent runs per k (default 4)
 //!   --jobs J       threads (default: all cores)
 //!   --population P (default 10)
+//!   --replace-parent  one-to-one replacement; with --population 2, HEAD's scheme
 
 #[path = "common/qap.rs"]
 mod common; // only for its argument parser
@@ -326,6 +327,9 @@ struct Settings {
     runs: u64,
     jobs: usize,
     population: usize,
+    /// One-to-one replacement (a child replaces its first parent): with a
+    /// population of 2 this is the scheme of HEAD (Moalic & Gondran 2018).
+    replace_parent: bool,
 }
 
 /// One HEA run for k colours from seed `seed`. Returns a legal colouring if found.
@@ -340,7 +344,7 @@ fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> Optio
         }),
     );
     let mut st = State::new(start, seed);
-    Memetic::new(
+    let memetic = Memetic::new(
         tabucol,
         MaxIterations::new(set.iters * n as u64)
             .or(Target::new(0))
@@ -352,11 +356,17 @@ fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> Optio
     .with_distance(
         |a: &Coloring, b: &Coloring| partition_distance(a, b),
         n / 10,
-    )
-    .runner(&mut st)
-    .until(MaxIterations::new(set.generations).or(cancel))
-    .stop_when(|st| st.global_best().cost() == 0)
-    .run();
+    );
+    let mut memetic = if set.replace_parent {
+        memetic.replace_parent()
+    } else {
+        memetic
+    };
+    memetic
+        .runner(&mut st)
+        .until(MaxIterations::new(set.generations).or(cancel))
+        .stop_when(|st| st.global_best().cost() == 0)
+        .run();
     let best = st.global_best();
     (best.cost() == 0).then(|| {
         cancel.cancel();
@@ -380,6 +390,7 @@ fn main() {
             .value("--jobs")
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
         population: args.value("--population").unwrap_or(10),
+        replace_parent: args.flag("--replace-parent"),
     };
     let file = args.0.first().expect("usage: coloring FILE.col [options]");
     let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file}: {e}"));
@@ -524,6 +535,7 @@ mod tests {
             runs: 2,
             jobs: 2,
             population: 6,
+            replace_parent: false,
         };
         let found = run_many(set.runs, set.jobs, |r, c| hea(&g, k - 1, r + 1, c, &set))
             .into_iter()
