@@ -21,7 +21,8 @@
 //!   --runs R       independent runs per k (default 4)
 //!   --jobs J       threads (default: all cores)
 //!   --population P (default 10)
-//!   --replace-parent  one-to-one replacement; with --population 2, HEAD's scheme
+//!   --replace-parent  one-to-one replacement (a child replaces its parent if better)
+//!   --head         HEAD's scheme: population 2, children always replace their parent, elites every 10
 
 #[path = "common/qap.rs"]
 mod common; // only for its argument parser
@@ -330,6 +331,9 @@ struct Settings {
     /// One-to-one replacement (a child replaces its first parent): with a
     /// population of 2 this is the scheme of HEAD (Moalic & Gondran 2018).
     replace_parent: bool,
+    /// HEAD: population 2, each child always replaces its parent, elites
+    /// reintroduced every 10 children.
+    head: bool,
 }
 
 /// One HEA run for k colours from seed `seed`. Returns a legal colouring if found.
@@ -357,7 +361,9 @@ fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> Optio
         |a: &Coloring, b: &Coloring| partition_distance(a, b),
         n / 10,
     );
-    let mut memetic = if set.replace_parent {
+    let mut memetic = if set.head {
+        memetic.replace_parent_always().elites(10)
+    } else if set.replace_parent {
         memetic.replace_parent()
     } else {
         memetic
@@ -382,7 +388,7 @@ fn main() {
     let mut args = Args::from_env();
     let first_k: Option<usize> = args.value("--k");
     let stop_at: Option<usize> = args.value("--stop-at");
-    let set = Settings {
+    let mut set = Settings {
         generations: args.value("--generations").unwrap_or(2000),
         iters: args.value("--iters").unwrap_or(10),
         runs: args.value("--runs").unwrap_or(4),
@@ -391,7 +397,11 @@ fn main() {
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
         population: args.value("--population").unwrap_or(10),
         replace_parent: args.flag("--replace-parent"),
+        head: args.flag("--head"),
     };
+    if set.head {
+        set.population = 2;
+    }
     let file = args.0.first().expect("usage: coloring FILE.col [options]");
     let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file}: {e}"));
     let g = Graph::parse(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
@@ -536,6 +546,7 @@ mod tests {
             jobs: 2,
             population: 6,
             replace_parent: false,
+            head: false,
         };
         let found = run_many(set.runs, set.jobs, |r, c| hea(&g, k - 1, r + 1, c, &set))
             .into_iter()

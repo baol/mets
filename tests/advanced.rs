@@ -372,3 +372,35 @@ fn dynamic_tabu_tenure_is_computed_per_move() {
     }
     assert_eq!(calls, 50);
 }
+
+#[test]
+fn head_style_memetic_keeps_moving_and_reinjects_elites() {
+    // population 2, children always replace their parent, elites every 3 steps
+    let mut st = State::new(Sort(reversed(40)), 8);
+    let mut memetic = Memetic::new(
+        LocalSearch::first_improvement(SwapNeighborhood),
+        MaxIterations::new(5), // short improvement: children are often worse than parents
+        perturb_with(|s: &mut Evaluated<Sort>, rng| shuffle(s, rng)),
+        UniformCrossover,
+        2,
+    )
+    .replace_parent_always()
+    .elites(3);
+    let mut costs = Vec::new();
+    memetic
+        .runner(&mut st)
+        .until(MaxIterations::new(60))
+        .on_event(|e, st| {
+            if e == Event::Restart {
+                costs.push(st.current().cost())
+            }
+        })
+        .run();
+    assert_eq!(memetic.population().len(), 2);
+    for m in memetic.population() {
+        assert_eq!(m.cost(), m.evaluate());
+    }
+    // the global best is kept even though members are replaced unconditionally
+    assert!(st.best().cost() <= memetic.population().iter().map(|m| m.cost()).min().unwrap());
+    assert!(costs.len() == 60);
+}

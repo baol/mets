@@ -52,6 +52,14 @@ pub struct Memetic<S: Model, I, T, P, X> {
     /// Differential-evolution style one-to-one selection: a child competes
     /// with its first parent only.
     replace_parent: bool,
+    /// With `replace_parent`: replace the parent even if the child is worse.
+    always: bool,
+    /// `elites(cycle)`: every `cycle` steps, the best child of the previous
+    /// cycle replaces a random member.
+    elite_cycle: u64,
+    elite_current: Option<Evaluated<S>>,
+    elite_previous: Option<Evaluated<S>>,
+    steps: u64,
     /// First parent of the current child (for `replace_parent`).
     parent: Option<usize>,
     population: Vec<Evaluated<S>>,
@@ -72,6 +80,11 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
             renew_after: u64::MAX,
             distance: None,
             replace_parent: false,
+            always: false,
+            elite_cycle: u64::MAX,
+            elite_current: None,
+            elite_previous: None,
+            steps: 0,
             parent: None,
             population: Vec::new(),
             since_insertion: 0,
@@ -107,6 +120,24 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
         self
     }
 
+    /// Like `replace_parent`, but the child replaces its first parent even
+    /// when it is worse: the population keeps moving, as in HEAD (Moalic &
+    /// Gondran 2018), where two members evolve by crossing each other.
+    /// Combine with `elites` so good solutions are not lost.
+    pub fn replace_parent_always(mut self) -> Self {
+        self.replace_parent = true;
+        self.always = true;
+        self
+    }
+
+    /// Every `cycle` steps, the best child of the previous cycle replaces a
+    /// random member (HEAD's elites): reintroduces good solutions that the
+    /// population moved away from.
+    pub fn elites(mut self, cycle: u64) -> Self {
+        self.elite_cycle = cycle.max(1);
+        self
+    }
+
     pub fn population(&self) -> &[Evaluated<S>] {
         &self.population
     }
@@ -120,7 +151,7 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
                     self.population.push(s);
                     true
                 }
-                Some(a) if s.cost() < self.population[a].cost() => {
+                Some(a) if self.always || s.cost() < self.population[a].cost() => {
                     self.population[a] = s;
                     true
                 }
@@ -220,11 +251,28 @@ where
             .run();
         let (run_best, improved_outer) = scope.finish();
 
-        // 3. replace the worst member
+        // 3. remember the cycle's elite, then insert
+        if self.elite_cycle != u64::MAX
+            && self
+                .elite_current
+                .as_ref()
+                .is_none_or(|e| run_best.cost() < e.cost())
+        {
+            self.elite_current = Some(run_best.clone());
+        }
         if self.insert(run_best) {
             self.since_insertion = 0;
         } else {
             self.since_insertion += 1;
+        }
+        // 4. at the end of a cycle, reintroduce the previous cycle's elite
+        self.steps += 1;
+        if self.steps.is_multiple_of(self.elite_cycle) && self.population.len() >= self.size {
+            if let Some(e) = self.elite_previous.take() {
+                let i = st.rng().random_range(0..self.population.len());
+                self.population[i] = e;
+            }
+            self.elite_previous = self.elite_current.take();
         }
         if improved_outer {
             Step::Improved
@@ -236,5 +284,8 @@ where
     fn start(&mut self, _st: &mut State<S, R>) {
         self.population.clear();
         self.since_insertion = 0;
+        self.steps = 0;
+        self.elite_current = None;
+        self.elite_previous = None;
     }
 }
