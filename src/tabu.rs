@@ -216,6 +216,8 @@ pub struct TabuSearch<N, T, A = BestEver> {
     pub neighborhood: N,
     pub tabu: T,
     pub aspiration: A,
+    /// `random_ties`: choose uniformly among equally good admissible moves.
+    ties: Option<DefaultRng>,
 }
 
 impl<N, T> TabuSearch<N, T, BestEver> {
@@ -224,6 +226,7 @@ impl<N, T> TabuSearch<N, T, BestEver> {
             neighborhood,
             tabu,
             aspiration: BestEver,
+            ties: None,
         }
     }
 }
@@ -234,7 +237,18 @@ impl<N, T, A> TabuSearch<N, T, A> {
             neighborhood: self.neighborhood,
             tabu: self.tabu,
             aspiration,
+            ties: self.ties,
         }
+    }
+
+    /// Choose uniformly at random among equally good admissible moves,
+    /// instead of the first one generated. Important on plateaus (TabuCol's
+    /// conflicts count has many ties). Neighborhoods then get no pruning
+    /// bound, since a move equal to the best so far can still be chosen.
+    /// The RNG is seeded from the run's RNG at `start`.
+    pub fn random_ties(mut self) -> Self {
+        self.ties = Some(DefaultRng::seed_from_u64(0));
+        self
     }
 }
 
@@ -245,6 +259,9 @@ struct Admissible<'a, S: Model, R, M, T, A> {
     asp: &'a A,
     best: Option<(M, S::Cost, bool)>,
     bound: S::Cost,
+    /// Random tie-breaking: the RNG, and how many admissible moves tie at `bound`.
+    ties: Option<&'a mut DefaultRng>,
+    tied: u32,
 }
 
 impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
@@ -253,10 +270,21 @@ impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
     #[inline]
     fn visit(&mut self, m: M, delta: S::Cost) -> ControlFlow<()> {
         // tabu status is only checked for moves that would be selected
-        if delta < self.bound {
+        let tie = self.best.is_some() && delta == self.bound && self.ties.is_some();
+        if delta < self.bound || tie {
             let tabu = self.tabu.is_tabu(self.cur, &m, self.st.iteration());
             let aspired = tabu && self.asp.allows(self.st, &m, self.cur.cost() + delta);
             if !tabu || aspired {
+                if tie {
+                    // reservoir sampling: the i-th tied move is kept with probability 1/i
+                    self.tied += 1;
+                    let rng = self.ties.as_mut().expect("ties enabled");
+                    if rng.random_range(0..self.tied) != 0 {
+                        return ControlFlow::Continue(());
+                    }
+                } else {
+                    self.tied = 1;
+                }
                 self.bound = delta;
                 self.best = Some((m, delta, aspired));
             }
@@ -265,7 +293,8 @@ impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
     }
     #[inline]
     fn bound(&self) -> Option<S::Cost> {
-        Some(self.bound)
+        // with random ties, moves equal to the bound can still be chosen
+        self.ties.is_none().then_some(self.bound)
     }
 }
 
@@ -285,6 +314,8 @@ where
             asp: &self.aspiration,
             best: None,
             bound: S::Cost::max_value(),
+            ties: self.ties.as_mut(),
+            tied: 0,
         };
         let _ = self.neighborhood.explore(st.current(), &mut v);
         let Some((m, delta, aspired)) = v.best else {
@@ -301,5 +332,8 @@ where
         let (cur, rng) = st.current_and_rng();
         self.tabu.start(cur, rng);
         self.neighborhood.start(cur, rng);
+        if self.ties.is_some() {
+            self.ties = Some(DefaultRng::seed_from_u64(rng.next_u64()));
+        }
     }
 }

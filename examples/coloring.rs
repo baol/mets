@@ -3,7 +3,7 @@
 //!
 //! * **TabuCol** (Hertz & de Werra; Galinier & Hao's tenure): `TabuSearch`
 //!   on recolourings of conflicting vertices, with a `DynamicTabu` tenure of
-//!   `random(0..10) + 0.6 · conflicting vertices`.
+//!   `random(0..10) + 0.6 · conflicting vertices` and random tie-breaking.
 //! * **HEA**: `Memetic` with the GPX crossover (alternately inherit the
 //!   largest remaining colour class of each parent), TabuCol as the
 //!   improvement step, and a partition distance for population diversity.
@@ -17,7 +17,7 @@
 //!   --k K          first k to try (default: greedy colouring − 1)
 //!   --stop-at K    stop after a legal K-colouring (default: never)
 //!   --generations G   children per run and per k (default 2000)
-//!   --iters L      TabuCol iterations per child, in units of n (default 10)
+//!   --iters L      TabuCol iterations per child, in units of n (default 10; 60 with --head)
 //!   --runs R       independent runs per k (default 4)
 //!   --jobs J       threads (default: all cores)
 //!   --population P (default 10)
@@ -346,7 +346,8 @@ fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> Optio
         DynamicTabu::new(|s: &Coloring, rng| {
             rng.random_range(0..10) + (0.6 * s.conflicting as f64) as u64
         }),
-    );
+    )
+    .random_ties();
     let mut st = State::new(start, seed);
     let memetic = Memetic::new(
         tabucol,
@@ -390,7 +391,7 @@ fn main() {
     let stop_at: Option<usize> = args.value("--stop-at");
     let mut set = Settings {
         generations: args.value("--generations").unwrap_or(2000),
-        iters: args.value("--iters").unwrap_or(10),
+        iters: 0, // set below: 10, or 60 for --head
         runs: args.value("--runs").unwrap_or(4),
         jobs: args
             .value("--jobs")
@@ -399,6 +400,8 @@ fn main() {
         replace_parent: args.flag("--replace-parent"),
         head: args.flag("--head"),
     };
+    let iters: Option<u64> = args.value("--iters");
+    set.iters = iters.unwrap_or(if set.head { 60 } else { 10 });
     if set.head {
         set.population = 2;
     }

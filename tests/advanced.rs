@@ -404,3 +404,32 @@ fn head_style_memetic_keeps_moving_and_reinjects_elites() {
     assert!(st.best().cost() <= memetic.population().iter().map(|m| m.cost()).min().unwrap());
     assert!(costs.len() == 60);
 }
+
+#[test]
+fn random_ties_are_reproducible_and_explore_plateaus() {
+    // Sort has many equal swap deltas: random tie-breaking changes the walk,
+    // but a given seed always gives the same one.
+    let walk = |seed| {
+        let mut st = State::new(Sort(reversed(16)), seed);
+        let mut trace = Vec::new();
+        TabuSearch::new(SwapNeighborhood, DenseTabu::new(Tenure::Fixed(5)))
+            .random_ties()
+            .runner(&mut st)
+            .until(MaxIterations::new(40))
+            .on_move(|st| trace.push(st.current().cost()))
+            .run();
+        (trace, st.current().as_slice().to_vec())
+    };
+    assert_eq!(walk(1), walk(1));
+    assert!(
+        (2..6).any(|s| walk(s).1 != walk(1).1),
+        "different seeds take different tied moves"
+    );
+    // the best move is still chosen: the first move is the steepest one either way
+    let mut plain = State::new(Sort(reversed(16)), 1);
+    TabuSearch::new(SwapNeighborhood, DenseTabu::new(Tenure::Fixed(5)))
+        .runner(&mut plain)
+        .until(MaxIterations::new(1))
+        .run();
+    assert_eq!(walk(3).0[0], plain.current().cost());
+}
