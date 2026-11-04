@@ -32,6 +32,8 @@ examples/qap          qap/main_ts.cc + qap/main.cc ports, plus SA/LAHC/RRT/ILS
 examples/qap_advanced memetic / restarts / LNS solvers assembled from library pieces
 examples/common/qap   QAP instance, models and QAPLIB sweep shared by both QAP examples
 examples/vcp          vcp/vcp.cc port (TabuCol-like iterated tabu search)
+examples/coloring     DIMACS graph colouring: TabuCol and Galinier & Hao's hybrid
+                      evolutionary algorithm (Memetic + GPX crossover)
 tests/                every algorithm, full-evaluation models, delta checks,
                       nesting and scopes, dyn Search, a user-defined VND,
                       LNS, memetic, robust tabu, parallel runs
@@ -809,9 +811,20 @@ recombination. It is a steady-state population of `size` solutions:
    shuffle); then a `Crossover` of two random members.
 2. The inner search improves it in its own best-scope, exactly as an
    `IteratedSearch` run (§3.9).
-3. The result replaces the worst member if it is better and its cost is not
-   already present (a cheap duplicate test, which keeps the population
-   diverse without requiring `PartialEq` on the model).
+3. The result enters the population by one of three rules:
+   * default: it replaces the worst member if it is better and its cost is
+     not already present (a cheap duplicate test, which needs no
+     `PartialEq` on the model);
+   * `with_distance(d, min)`: a result closer than `min` to some member
+     competes with that member only (it replaces it if better); a result far
+     from every member replaces the worst if better. Each region of the
+     search space keeps its own best, which is how strong memetic methods
+     for the QAP and for colouring keep diversity;
+   * `replace_parent()`: differential evolution's one-to-one selection: the
+     result replaces its first parent if better, and nothing else. The
+     population fills unconditionally (equal costs can't stall it). With two
+     members this is the scheme of HEAD, the simple record-holding colouring
+     method (Moalic & Gondran 2018).
 4. After `renew_after(k)` steps without an insertion, every member but the
    best is replaced by fresh solutions.
 
@@ -843,7 +856,9 @@ structures (a delta matrix) valid.
 | `BestRearrangement` | A very large neighborhood for LNS: k random positions, all k! − 1 *other* arrangements of their elements tried by Heap's algorithm (one swap per neighbor), move to the best even if worse. C(n, k)·k! neighbors in all. |
 | `UniformCrossover` | Merz & Freisleben's crossover: common assignments kept, other positions take a parent's element at random when free, the rest filled at random. |
 | `adaptive_perturbation(n)` | `perturb` with `ils::Adaptive` strength: from n/10 swaps, growing while the incumbent is unchanged, reset on change. `Adaptive` itself takes any `(s, strength, rng)` operation. |
-| `rearrange(s, target)` | Move to any target permutation with at most n − 1 swaps (used by the crossover). |
+| `PathRelinking { fraction }` | Differential evolution's `a + F·(b − a)` for permutations: the child starts as `a` and takes `b`'s element at a random `fraction` of the positions where they differ. |
+| `hamming(a, b)` | Positions where two permutations differ: a distance for `Memetic::with_distance`. |
+| `rearrange(s, target)` | Move to any target permutation with at most n − 1 swaps (used by the crossovers). |
 
 `RobustTabuSearch` is its own `Search`, not a `TabuList` for `TabuSearch`:
 a tabu list can only make moves admissible or not, while RoTS's long-term
@@ -853,7 +868,14 @@ every acceptance rule would degenerate to a descent, and the search would stop
 at the first local optimum of the neighborhood (measured: 2.35% on `tai60a`,
 unchanged from 20,000 to 100,000 steps).
 
-### 3.14 Parallel runs
+### 3.14 Dynamic tabu tenure
+
+`DynamicTabu::new(|s: &S, rng| tenure)` is a `DenseTabu` whose tenure is
+computed at every move from the solution before the move. TabuCol's rule,
+`random(0..10) + 0.6 · conflicting vertices`, is one line with it
+(`examples/coloring.rs`). `Tenure::Fixed`/`Random` remain for the common case.
+
+### 3.15 Parallel runs
 
 ```rust
 let results = parallel::run_many(runs, jobs, |run, cancel| {
@@ -995,6 +1017,26 @@ independent runs on 4 threads, best of them; times are wall-clock.
   hard instances at about the same CPU time, including `tai100b`'s
   best-known value.
 
+### Graph colouring (DIMACS)
+
+`examples/coloring.rs` reads DIMACS `.col` files, starts from a DSATUR
+colouring, and runs Galinier & Hao's hybrid evolutionary algorithm for
+decreasing k: `Memetic` (population 10, GPX crossover, a partition
+distance for diversity) around TabuCol (`TabuSearch` on recolourings of
+conflicting vertices with `DynamicTabu`). 4 independent runs on 4 threads;
+the first legal colouring cancels the others. Every colouring reported is
+re-checked for legality.
+
+| instance | best known | found | time |
+|---|---|---|---|
+| DSJC125.5 | 17 | **17** | 0.1 s |
+| DSJC250.5 | 28 | **28** | 1.4 s |
+| DSJC500.5 | 47 | 49 | 5 s (48 not found in 23 min) |
+
+The best-known values come from methods that run TabuCol for much longer per
+child (HEAD) or use richer crossovers and pool management (MACOL, QA). No
+record has been beaten.
+
 The C++ benchmark source is not committed. It is a 40-line program that
 includes `metslib/mets.hh`, and can be added to METSlib's `test/` if useful.
 
@@ -1017,6 +1059,7 @@ which the compiler or ergonomics forced:
 | `Neighborhood` implemented for an RNG-owning `Sampled { .. }` | `Sampled::new(sampler, k)`, seeded in `Neighborhood::start` | Constructor style and reproducibility. |
 | `Permutation` with `size()` and `swap()` | `as_slice()` required, `size()` provided | Robust tabu search and the crossover need to read which element is at each position. |
 | A rearrangement neighborhood that keeps the best arrangement, current included | `BestRearrangement` always moves to the best *other* arrangement | Otherwise a rebuild never worsens, every acceptance rule becomes a descent, and LNS stops at the first local optimum (§3.13). |
+| The duplicate test as the memetic diversity rule | also `with_distance` and `replace_parent` | With replace-parent and the duplicate test together, a population of equal-cost members never filled, so no crossover ever happened (found in testing). |
 | Robust tabu search as a `TabuList` for `TabuSearch` | its own `Search` (`perm::RobustTabuSearch`) | Its long-term aspiration forces worsening moves, which a tabu list cannot express. |
 
 ---
@@ -1044,9 +1087,6 @@ which the compiler or ergonomics forced:
   in an LNS loses to tabu search (§4). It may do better as an intensification
   step (applied to the best solution of each inner run) or as the
   perturbation of an iterated search; neither is measured yet.
-* **Memetic diversity.** The duplicate test compares costs only. A distance
-  (e.g. number of differing positions) would keep the population more diverse
-  on instances with many equal-cost solutions.
 * **Reactive tabu search**: observers get `&State` only. Changing the tenure
   from an observer would need `&mut` access to the algorithm. A user loop
   that calls `step` directly already allows it.
