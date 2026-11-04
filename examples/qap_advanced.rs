@@ -5,7 +5,8 @@
 //! * `memetic` (default): a population of 10 solutions improved by an
 //!   iterated robust tabu search (`perm::RobustTabuSearch` +
 //!   `perm::adaptive_perturbation`); new starting points come from a
-//!   `perm::UniformCrossover` of two members instead of a random restart.
+//!   `perm::UniformCrossover` of two members instead of a random restart;
+//!   members stay at least n/10 positions apart (`perm::hamming`).
 //! * `restarts`: the same improvement, restarted from random permutations
 //!   (the baseline the crossover replaces).
 //! * `lns`: large neighborhood search with `perm::BestRearrangement`: every
@@ -25,6 +26,8 @@
 //!   --method M     memetic | restarts | lns (default memetic)
 //!   --steps N      per run: children / restarts (default 50), or rebuilds for lns (default 1500000)
 //!   --population P memetic: population size (default 10)
+//!   --crossover X  memetic: uniform | path (path relinking half-way, DE-style) (default uniform)
+//!   --replacement Y  memetic: niche (closest member or worst) | parent (DE one-to-one) (default niche)
 //!   --k K          lns: positions rearranged per step (default 5)
 //!   --runs R       independent runs (default 4)
 //!   --jobs J       threads (default: all cores)
@@ -60,6 +63,27 @@ struct Settings {
     k: usize,
     /// memetic: population size.
     population: usize,
+    /// memetic: recombination.
+    crossover: Recombine,
+    /// memetic: differential-evolution one-to-one selection.
+    replace_parent: bool,
+}
+
+/// The two permutation recombinations of the library, chosen at run time.
+#[derive(Clone, Copy, PartialEq)]
+enum Recombine {
+    Uniform,
+    /// Path relinking half-way: DE's `a + F·(b − a)` with F = 0.5.
+    Path,
+}
+
+impl<S: perm::Permutation> Crossover<S> for Recombine {
+    fn cross(&mut self, a: &S, b: &S, child: &mut S, rng: &mut dyn mets::rand::RngCore) {
+        match self {
+            Recombine::Uniform => UniformCrossover.cross(a, b, child, rng),
+            Recombine::Path => perm::PathRelinking { fraction: 0.5 }.cross(a, b, child, rng),
+        }
+    }
 }
 
 /// The improvement step of `memetic` and `restarts`: iterated robust tabu
@@ -84,18 +108,28 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
     match set.method {
         Method::Memetic => {
             let mut st = State::new(QapTaillard::new(inst, start), seed);
-            Memetic::new(
+            let memetic = Memetic::new(
                 improvement(n, cancel),
                 NoImprovement::new(20).or(cancel),
                 fresh(),
-                UniformCrossover,
+                set.crossover,
                 set.population,
             )
-            .renew_after(20)
-            .runner(&mut st)
-            .until(steps)
-            .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
-            .run();
+            .with_distance(
+                |a: &QapTaillard, b: &QapTaillard| perm::hamming(a, b),
+                n / 10,
+            )
+            .renew_after(20);
+            let mut memetic = if set.replace_parent {
+                memetic.replace_parent()
+            } else {
+                memetic
+            };
+            memetic
+                .runner(&mut st)
+                .until(steps)
+                .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
+                .run();
             st.global_best().cost()
         }
         Method::Restarts => {
@@ -174,11 +208,21 @@ fn main() {
         stop_at_best: !run_to_end,
         k: args.value("--k").unwrap_or(5),
         population: args.value("--population").unwrap_or(10),
+        crossover: match args.value::<String>("--crossover").as_deref() {
+            None | Some("uniform") => Recombine::Uniform,
+            Some("path") => Recombine::Path,
+            Some(x) => panic!("unknown crossover {x:?} (uniform, path)"),
+        },
+        replace_parent: match args.value::<String>("--replacement").as_deref() {
+            None | Some("niche") => false,
+            Some("parent") => true,
+            Some(x) => panic!("unknown replacement {x:?} (niche, parent)"),
+        },
     };
     let args = args.0;
     let what = match set.method {
         Method::Memetic => {
-            "memetic (population 10, uniform crossover) of iterated robust tabu search"
+            "memetic of iterated robust tabu search"
         }
         Method::Restarts => "random restarts of iterated robust tabu search",
         Method::Lns => {
@@ -250,6 +294,8 @@ mod tests {
                 jobs,
                 k: 5,
                 population: 4,
+                crossover: Recombine::Uniform,
+                replace_parent: false,
                 stop_at_best: false,
             };
             assert_eq!(
@@ -269,6 +315,8 @@ mod tests {
             jobs: 2,
             k: 5,
             population: 4,
+            crossover: Recombine::Uniform,
+            replace_parent: false,
             stop_at_best: true,
         };
         let found = solve(

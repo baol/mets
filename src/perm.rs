@@ -454,3 +454,38 @@ impl<S: Permutation> Crossover<S> for UniformCrossover {
         rearrange(child, &target);
     }
 }
+
+/// Path relinking, the permutation counterpart of differential evolution's
+/// `a + F·(b − a)`: the child starts as `a` and takes `b`'s element at a
+/// random `fraction` of the positions where they differ (through swaps, so
+/// it stays a permutation; each swap may also fix a second position).
+#[derive(Clone, Copy, Debug)]
+pub struct PathRelinking {
+    pub fraction: f64,
+}
+
+impl<S: Permutation> Crossover<S> for PathRelinking {
+    fn cross(&mut self, _a: &S, b: &S, child: &mut S, rng: &mut dyn RngCore) {
+        let pb = b.as_slice();
+        let mut differ: Vec<usize> = (0..pb.len())
+            .filter(|&i| child.as_slice()[i] != pb[i])
+            .collect();
+        for t in (1..differ.len()).rev() {
+            differ.swap(t, rng.random_range(0..=t));
+        }
+        let steps = ((self.fraction * differ.len() as f64).round() as usize).min(differ.len());
+        let mut position = vec![0; pb.len()];
+        for (i, &e) in child.as_slice().iter().enumerate() {
+            position[e] = i;
+        }
+        for &i in &differ[..steps] {
+            let (current, wanted) = (child.as_slice()[i], pb[i]);
+            if current != wanted {
+                let j = position[wanted];
+                child.swap(i, j);
+                position[current] = j;
+                position[wanted] = i;
+            }
+        }
+    }
+}

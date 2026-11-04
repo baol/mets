@@ -49,6 +49,11 @@ pub struct Memetic<S: Model, I, T, P, X> {
     /// A distance between solutions and the minimum distance between
     /// members (see [`Memetic::with_distance`]).
     distance: Option<(Distance<S>, usize)>,
+    /// Differential-evolution style one-to-one selection: a child competes
+    /// with its first parent only.
+    replace_parent: bool,
+    /// First parent of the current child (for `replace_parent`).
+    parent: Option<usize>,
     population: Vec<Evaluated<S>>,
     since_insertion: u64,
 }
@@ -66,6 +71,8 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
             size,
             renew_after: u64::MAX,
             distance: None,
+            replace_parent: false,
+            parent: None,
             population: Vec::new(),
             since_insertion: 0,
         }
@@ -91,12 +98,35 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
         self
     }
 
+    /// One-to-one selection, as in differential evolution: once the
+    /// population is full, a child replaces its first parent if it is better,
+    /// and nothing else. Diversity comes from every member keeping its own
+    /// lineage. Takes precedence over `with_distance`.
+    pub fn replace_parent(mut self) -> Self {
+        self.replace_parent = true;
+        self
+    }
+
     pub fn population(&self) -> &[Evaluated<S>] {
         &self.population
     }
 
     /// Insert `s` (see `with_distance` for the rule). Returns true if inserted.
     fn insert(&mut self, s: Evaluated<S>) -> bool {
+        if self.replace_parent {
+            return match self.parent {
+                // filling: every fresh solution enters, as in differential evolution
+                None => {
+                    self.population.push(s);
+                    true
+                }
+                Some(a) if s.cost() < self.population[a].cost() => {
+                    self.population[a] = s;
+                    true
+                }
+                Some(_) => false,
+            };
+        }
         if let Some((distance, min)) = &self.distance {
             let closest = (0..self.population.len())
                 .map(|i| (distance(&s, &self.population[i]), i))
@@ -162,11 +192,12 @@ where
 
         // 1. a starting point: fresh while filling, then a child
         if self.population.len() < self.size {
+            self.parent = None;
             let init = &mut self.init;
             st.modify_current(|cur, rng| init.perturb(cur, rng));
         } else {
             let (pop, crossover) = (&self.population, &mut self.crossover);
-            st.modify_current(|cur, rng| {
+            let a = st.modify_current(|cur, rng| {
                 let a = rng.random_range(0..pop.len());
                 let mut b = rng.random_range(0..pop.len() - 1);
                 if b >= a {
@@ -174,7 +205,9 @@ where
                 }
                 cur.clone_from(&pop[a]);
                 cur.modify(|child| crossover.cross(&pop[a], &pop[b], child, rng));
+                a
             });
+            self.parent = Some(a);
         }
         obs.notify(Event::Restart, st);
 

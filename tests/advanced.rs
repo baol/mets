@@ -288,3 +288,87 @@ fn run_many_is_ordered_deterministic_and_cancellable() {
     assert!(cancelled.len() < 100);
     assert!(cancelled.iter().any(|&(r, _)| r == 3));
 }
+
+#[test]
+fn path_relinking_moves_a_fraction_of_the_way() {
+    let mut r = rng(11);
+    for fraction in [0.0, 0.3, 0.5, 1.0] {
+        let a = Sort(reversed(30));
+        let b = Sort((0..30).collect());
+        let mut child = a.clone();
+        perm::PathRelinking { fraction }.cross(&a, &b, &mut child, &mut r);
+        assert!(is_permutation(child.as_slice()));
+        let from_a = perm::hamming(&a, &child);
+        let to_b = perm::hamming(&child, &b);
+        assert!(
+            from_a + to_b >= perm::hamming(&a, &b),
+            "triangle inequality"
+        );
+        if fraction == 0.0 {
+            assert_eq!(from_a, 0);
+        }
+        if fraction == 1.0 {
+            assert_eq!(to_b, 0);
+        }
+        if fraction == 0.5 {
+            assert!(to_b > 0 && from_a > 0 && to_b < 30);
+        }
+    }
+}
+
+#[test]
+fn memetic_with_one_to_one_replacement_and_path_relinking() {
+    let mut st = State::new(Sort(reversed(30)), 5);
+    let mut memetic = Memetic::new(
+        LocalSearch::first_improvement(SwapNeighborhood),
+        Unlimited,
+        perturb_with(|s: &mut Evaluated<Sort>, rng| shuffle(s, rng)),
+        perm::PathRelinking { fraction: 0.5 },
+        6,
+    )
+    .replace_parent();
+    // a fixed number of steps, so the population fills and children replace parents
+    memetic.runner(&mut st).until(MaxIterations::new(60)).run();
+    assert_eq!(st.best().cost(), 0);
+    assert_eq!(
+        memetic.population().len(),
+        6,
+        "fills even when members share a cost"
+    );
+}
+
+#[test]
+fn memetic_with_distance_keeps_members_apart() {
+    let mut st = State::new(Sort(reversed(30)), 6);
+    let mut memetic = Memetic::new(
+        LocalSearch::first_improvement(SwapNeighborhood),
+        Unlimited,
+        perturb_with(|s: &mut Evaluated<Sort>, rng| shuffle(s, rng)),
+        UniformCrossover,
+        6,
+    )
+    .with_distance(|a: &Sort, b: &Sort| perm::hamming(a, b), 3);
+    memetic.runner(&mut st).until(MaxIterations::new(200)).run();
+    assert!(st.best().cost() < Sort(reversed(30)).evaluate());
+    let pop = memetic.population();
+    let close = (0..pop.len())
+        .flat_map(|i| (i + 1..pop.len()).map(move |j| (i, j)))
+        .filter(|&(i, j)| perm::hamming(&*pop[i], &*pop[j]) < 3)
+        .count();
+    assert!(close <= 1, "{close} pairs closer than the minimum distance");
+}
+
+#[test]
+fn dynamic_tabu_tenure_is_computed_per_move() {
+    let mut st = State::new(Sort(reversed(12)), 1);
+    let mut calls = 0u64;
+    {
+        let tabu = DynamicTabu::new(|_: &Sort, _rng| {
+            calls += 1;
+            3
+        });
+        let mut ts = TabuSearch::new(SwapNeighborhood, tabu);
+        ts.runner(&mut st).until(MaxIterations::new(50)).run();
+    }
+    assert_eq!(calls, 50);
+}
