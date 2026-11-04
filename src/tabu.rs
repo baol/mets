@@ -1,8 +1,10 @@
 //! Tabu search, tabu lists and aspiration criteria.
 
-use crate::{Evaluated, Event, Model, Neighborhood, Observer, Search, State, Step, Visitor};
+use crate::{
+    DefaultRng, Evaluated, Event, Model, Neighborhood, Observer, Search, State, Step, Visitor,
+};
 use num_traits::Bounded;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::{ControlFlow, RangeInclusive};
@@ -124,6 +126,48 @@ impl<S: Model, M: DenseAttr<S>> TabuList<S, M> for DenseTabu {
     }
     fn start<R: Rng + ?Sized>(&mut self, s: &S, rng: &mut R) {
         self.current = self.tenure.draw(rng);
+        self.until.clear();
+        self.until.resize(M::key_count(s), 0);
+    }
+}
+
+/// Like [`DenseTabu`], but the tenure is computed at every move from the
+/// solution before the move, e.g. TabuCol's `random(0..10) + 0.6 · conflicting
+/// vertices` (Galinier & Hao): `DynamicTabu::new(|s: &Coloring, rng| ..)`.
+/// The RNG is seeded from the run's RNG at `start`.
+pub struct DynamicTabu<F> {
+    tenure: F,
+    until: Vec<u64>,
+    rng: DefaultRng,
+}
+
+impl<F> DynamicTabu<F> {
+    pub fn new<S: Model>(tenure: F) -> Self
+    where
+        F: FnMut(&S, &mut DefaultRng) -> u64,
+    {
+        DynamicTabu {
+            tenure,
+            until: Vec::new(),
+            rng: DefaultRng::seed_from_u64(0),
+        }
+    }
+}
+
+impl<S: Model, M: DenseAttr<S>, F: FnMut(&S, &mut DefaultRng) -> u64> TabuList<S, M>
+    for DynamicTabu<F>
+{
+    #[inline]
+    fn is_tabu(&self, s: &S, m: &M, it: u64) -> bool {
+        self.until[m.key(s)] > it
+    }
+    #[inline]
+    fn make_tabu(&mut self, s: &S, m: &M, it: u64) {
+        let t = (self.tenure)(s, &mut self.rng);
+        self.until[m.reverse_key(s)] = it + 1 + t;
+    }
+    fn start<R: Rng + ?Sized>(&mut self, s: &S, rng: &mut R) {
+        self.rng = DefaultRng::seed_from_u64(rng.next_u64());
         self.until.clear();
         self.until.resize(M::key_count(s), 0);
     }

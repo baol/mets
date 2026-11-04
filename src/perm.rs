@@ -164,6 +164,16 @@ pub fn adaptive_perturbation<S: Permutation>(n: usize) -> Adaptive<PerturbFn<S>,
     Adaptive::new((n / 10).max(2), (n / 20).max(1), (n / 2).max(3), apply::<S>)
 }
 
+/// Number of positions where `a` and `b` differ: a distance for
+/// `Memetic::with_distance`.
+pub fn hamming<S: Permutation>(a: &S, b: &S) -> usize {
+    a.as_slice()
+        .iter()
+        .zip(b.as_slice())
+        .filter(|(x, y)| x != y)
+        .count()
+}
+
 /// Rearrange `s` so that its element at each position is `target[position]`,
 /// with at most n − 1 swaps (through `Permutation::swap`, so incremental
 /// structures of the model stay valid). Call it inside `Evaluated::modify`.

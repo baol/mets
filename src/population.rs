@@ -46,9 +46,14 @@ pub struct Memetic<S: Model, I, T, P, X> {
     /// Steps without an insertion before the population is renewed
     /// (all but the best member). `u64::MAX`: never.
     pub renew_after: u64,
+    /// A distance between solutions and the minimum distance between
+    /// members (see [`Memetic::with_distance`]).
+    distance: Option<(Distance<S>, usize)>,
     population: Vec<Evaluated<S>>,
     since_insertion: u64,
 }
+
+type Distance<S> = Box<dyn Fn(&S, &S) -> usize>;
 
 impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
     pub fn new(inner: I, inner_stop: T, init: P, crossover: X, size: usize) -> Self {
@@ -60,6 +65,7 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
             crossover,
             size,
             renew_after: u64::MAX,
+            distance: None,
             population: Vec::new(),
             since_insertion: 0,
         }
@@ -72,14 +78,40 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
         self
     }
 
+    /// Keep the population diverse: a child closer than `min` to a member may
+    /// only replace that member (and only if it is better); a child far from
+    /// every member replaces the worst if it is better. Without a distance,
+    /// children with the cost of an existing member are rejected.
+    pub fn with_distance(
+        mut self,
+        distance: impl Fn(&S, &S) -> usize + 'static,
+        min: usize,
+    ) -> Self {
+        self.distance = Some((Box::new(distance), min));
+        self
+    }
+
     pub fn population(&self) -> &[Evaluated<S>] {
         &self.population
     }
 
-    /// Insert `s` in place of the worst member if it is better and its cost
-    /// is not present yet (a cheap duplicate test). Returns true if inserted.
+    /// Insert `s` (see `with_distance` for the rule). Returns true if inserted.
     fn insert(&mut self, s: Evaluated<S>) -> bool {
-        if self.population.iter().any(|m| m.cost() == s.cost()) {
+        if let Some((distance, min)) = &self.distance {
+            let closest = (0..self.population.len())
+                .map(|i| (distance(&s, &self.population[i]), i))
+                .min_by_key(|&(d, _)| d);
+            if let Some((d, i)) = closest {
+                if d < *min {
+                    // too close: compete with that member only
+                    if s.cost() < self.population[i].cost() {
+                        self.population[i] = s;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        } else if self.population.iter().any(|m| m.cost() == s.cost()) {
             return false;
         }
         if self.population.len() < self.size {

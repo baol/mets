@@ -77,8 +77,8 @@ pub use stochastic::{
     SimulatedAnnealing, StochasticSearch, ThresholdAccepting,
 };
 pub use tabu::{
-    Aspiration, BestEver, DenseAttr, DenseTabu, NoAspiration, RecencyTabu, TabuAttr, TabuList,
-    TabuSearch, Tenure,
+    Aspiration, BestEver, DenseAttr, DenseTabu, DynamicTabu, NoAspiration, RecencyTabu, TabuAttr,
+    TabuList, TabuSearch, Tenure,
 };
 pub use termination::{
     stop_when, And, MaxIterations, NoImprovement, Or, StopWhen, Target, Termination,
