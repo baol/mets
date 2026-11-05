@@ -106,29 +106,35 @@ __device__ __forceinline__ unsigned int xs(unsigned int &s) {
     s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s;
 }
 
-// delta of swapping positions r and s of p (general, asymmetric formula)
-__device__ ll full_delta(const ll* __restrict__ a, const ll* __restrict__ b,
-                         const int* p, int n, int r, int s) {
+// delta of swapping positions r and s of p (general, asymmetric formula),
+// summed by the 32 lanes of a warp; the result is valid on every lane.
+// Columns of a and b are read as rows of their transposes at and bt.
+__device__ ll warp_delta(const ll* __restrict__ a, const ll* __restrict__ b,
+                         const ll* __restrict__ at, const ll* __restrict__ bt,
+                         const int* p, int n, int r, int s, int lane) {
     const int pr = p[r], ps = p[s];
-    ll d = a[r * n + r] * (b[ps * n + ps] - b[pr * n + pr])
-         + a[r * n + s] * (b[ps * n + pr] - b[pr * n + ps])
-         + a[s * n + r] * (b[pr * n + ps] - b[ps * n + pr])
-         + a[s * n + s] * (b[pr * n + pr] - b[ps * n + ps]);
-    for (int k = 0; k < n; k++) {
+    ll d = 0;
+    for (int k = lane; k < n; k += 32) {
         if (k == r || k == s) continue;
         const int pk = p[k];
-        d += (a[k * n + r] - a[k * n + s]) * (b[pk * n + ps] - b[pk * n + pr])
+        d += (at[r * n + k] - at[s * n + k]) * (bt[ps * n + pk] - bt[pr * n + pk])
            + (a[r * n + k] - a[s * n + k]) * (b[ps * n + pk] - b[pr * n + pk]);
     }
-    return d;
+    for (int o = 16; o > 0; o >>= 1) d += __shfl_xor_sync(0xffffffffu, d, o);
+    return d + a[r * n + r] * (b[ps * n + ps] - b[pr * n + pr])
+             + a[r * n + s] * (b[ps * n + pr] - b[pr * n + ps])
+             + a[s * n + r] * (b[pr * n + ps] - b[ps * n + pr])
+             + a[s * n + s] * (b[pr * n + pr] - b[ps * n + ps]);
 }
 
 extern "C" __global__ void rots(
-    const ll* __restrict__ a, const ll* __restrict__ b, int n,
+    const ll* __restrict__ a, const ll* __restrict__ b,
+    const ll* __restrict__ at, const ll* __restrict__ bt, int n,
     int* best_perm, ll* delta_all, int* tabu_all, ll* out_cost,
     long long iters, unsigned int seed)
 {
     const int blk = blockIdx.x, t = threadIdx.x, T = blockDim.x;
+    const int lane = t & 31, warp = t >> 5, warps = T >> 5;
     const int nn = n * n;
     extern __shared__ __align__(8) unsigned char smem[];
     ll* ca = (ll*)smem; ll* cb = ca + n; ll* ra = cb + n; ll* rb = ra + n;
@@ -154,9 +160,15 @@ extern "C" __global__ void rots(
         for (int q = t; q < nn; q += T) {
             const int i = q / n, j = q - i * n;
             local += a[q] * b[p[i] * n + p[j]];
-            if (i < j) D[q] = full_delta(a, b, p, n, i, j);
         }
         atomicAdd((u64*)&cur, (u64)local);
+        // the delta matrix, one pair per warp
+        for (int q = warp; q < nn; q += warps) {
+            const int i = q / n, j = q - i * n;
+            if (i >= j) continue;
+            const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane);
+            if (lane == 0) D[q] = d;
+        }
     }
     __syncthreads();
     if (t == 0) { bestc = cur; tenure = lo + (int)(xs(rng) % (unsigned)(hi - lo + 1)); }
@@ -209,11 +221,23 @@ extern "C" __global__ void rots(
             rb[k] = b[pu * n + pk] - b[pv * n + pk];
         }
         __syncthreads();
+        // Taillard's O(1) update of the pairs disjoint from {u, v} ...
         for (int q2 = t; q2 < nn; q2 += T) {
             const int i = q2 / n, j = q2 - i * n;
-            if (j <= i) continue;
-            if (i == u || i == v || j == u || j == v) D[q2] = full_delta(a, b, p, n, i, j);
-            else D[q2] += (ca[i] - ca[j]) * (cb[j] - cb[i]) + (ra[i] - ra[j]) * (rb[j] - rb[i]);
+            if (j <= i || i == u || i == v || j == u || j == v) continue;
+            D[q2] += (ca[i] - ca[j]) * (cb[j] - cb[i]) + (ra[i] - ra[j]) * (rb[j] - rb[i]);
+        }
+        // ... and the 2n - 3 pairs touching u or v from scratch, one per warp:
+        // slots m < n - 1 are the pairs (u, k), k != u; slots n - 1 .. 2n - 3
+        // the pairs (v, k), k != v, skipping (v, u), already in the first part
+        for (int m = warp; m < 2 * n - 2; m += warps) {
+            int x = u, k = m;
+            if (m >= n - 1) { x = v; k = m - (n - 1); }
+            if (k >= x) k++;                // skip x itself
+            if (x == v && k == u) continue;
+            const int i = min(x, k), j = max(x, k);
+            const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane);
+            if (lane == 0) D[i * n + j] = d;
         }
         __syncthreads();
         const bool improved = cur < bestc;
@@ -233,6 +257,8 @@ extern "C" __global__ void rots(
         f: CudaFunction,
         a: CudaSlice<i64>,
         b: CudaSlice<i64>,
+        at: CudaSlice<i64>,
+        bt: CudaSlice<i64>,
         best: CudaSlice<i32>,
         delta: CudaSlice<i64>,
         tabu: CudaSlice<i32>,
@@ -271,6 +297,8 @@ extern "C" __global__ void rots(
             Ok(GpuRots {
                 a: stream.clone_htod(&inst.a)?,
                 b: stream.clone_htod(&inst.b)?,
+                at: stream.clone_htod(&inst.at)?,
+                bt: stream.clone_htod(&inst.bt)?,
                 best: stream.alloc_zeros(p * n)?,
                 delta: stream.alloc_zeros(p * n * n)?,
                 tabu: stream.alloc_zeros(p * n * n)?,
@@ -306,6 +334,8 @@ extern "C" __global__ void rots(
             launch
                 .arg(&self.a)
                 .arg(&self.b)
+                .arg(&self.at)
+                .arg(&self.bt)
                 .arg(&n32)
                 .arg(&mut self.best)
                 .arg(&mut self.delta)
