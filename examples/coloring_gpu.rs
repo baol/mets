@@ -16,6 +16,10 @@
 //!   --threads T      GPU threads per block (default 128)
 //!   --cpu            improve on the CPU threads instead of the GPU
 //! A legal colouring is verified and saved as NAME.K.sol ("vertex colour", 1-based).
+//!   --polish-every G  every G generations, if the best colouring has 1 or 2
+//!                    conflicts, improve copies of it in one whole batch, each with
+//!                    its own seed, for --polish-iters L·n iterations (default 0: never)
+//!   --polish-iters L  (default 1000, run as launches of at most 200n)
 //!   --trace FILE     append one line per batch: time, cost spread, and a CPU
 //!                    recount of a few returned colourings (mismatches = kernel bug)
 //!
@@ -447,6 +451,8 @@ fn main() {
         .unwrap_or(if cpu { jobs } else { 1024 });
     let iters_n: u64 = args.value("--iters").unwrap_or(60);
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(3600.0);
+    let polish_every: u64 = args.value("--polish-every").unwrap_or(0);
+    let polish_iters: u64 = args.value("--polish-iters").unwrap_or(1000);
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let threads: u32 = args.value("--threads").unwrap_or(128);
     let trace_file: Option<String> = args.value("--trace");
@@ -514,6 +520,35 @@ fn main() {
         }
         if best.0 == 0 || secs > max_seconds {
             break;
+        }
+        // polish a near-solution: the whole batch continues the best colouring
+        if polish_every > 0 && generation % polish_every == 0 && best.0 <= 2 {
+            let t = Instant::now();
+            let mut copies = vec![best.1.clone(); p];
+            let mut done = 0;
+            while done < polish_iters && best.0 > 0 {
+                let chunk = (polish_iters - done).min(200);
+                let c = improver.improve(&mut copies, chunk * n as u64, rng.random());
+                if let Some(i) = (0..p).min_by_key(|&i| c[i]) {
+                    if c[i] < best.0 {
+                        best = (c[i], copies[i].clone());
+                    }
+                }
+                done += chunk;
+            }
+            let secs = t.elapsed().as_secs_f64();
+            println!(
+                "  polish after generation {generation}: best {} conflicts, {secs:.1} s",
+                best.0
+            );
+            trace.line(format_args!(
+                "polish gen={generation} iters={} best={} polish_s={secs:.3}",
+                polish_iters * n as u64,
+                best.0
+            ));
+            if best.0 == 0 {
+                break;
+            }
         }
         // HEAD: each member's child with its partner always replaces it
         for i in 0..p {
