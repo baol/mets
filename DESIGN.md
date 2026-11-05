@@ -1059,7 +1059,18 @@ independent runs on 4 threads, best of them; times are wall-clock.
   Taking only part of another island's best is about 2× faster and much more
   consistent on `sko100a`; copying a migrant whole (replace, cross) hurts.
   `tai100b` is solved fast by everything and doesn't separate the variants.
-  Five trials are few: a confirmation on more seeds and instances is pending.
+  Confirmation on 10 new seeds per configuration:
+
+  | instance | independent | part, every 50 | part, every 500 |
+  |---|---|---|---|
+  | sko100a | 10/10, 37 s (26) | 9/10, 64 s (35) | 10/10, 21 s (15) |
+  | sko90 | 10/10, 31 s (31) | 8/10, 28 s (31) | 8/10, 50 s (59) |
+  | tai80b | 10/10, 2.2 s (2.4) | 10/10, 3.0 s (3.2) | 10/10, 3.0 s (2.2) |
+
+  Partial migration is the best way to migrate, but not better than
+  independent runs in general: it is about 2× faster on `sko100a` (15 trials
+  in all), and worse on `sko90` (2 misses in 10) and `tai80b`. It stays
+  available (`--migration part --migrate-every 500`) and off by default.
 * Time to the best-known value, one core per run, 5 seeds, memetic search
   stopping at the target (`--runs 1 --jobs 1 --first-seed s`), against
   Merz & Freisleben's memetic algorithm (CEC 1999, Table 2: one core of a
