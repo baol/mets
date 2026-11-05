@@ -17,6 +17,12 @@ pub type C = i64;
 
 // ------------------------------------------------------------- instance
 
+/// Row `i` of the n×n row-major matrix `m`.
+#[inline]
+fn row(m: &[C], i: usize, n: usize) -> &[C] {
+    &m[i * n..][..n]
+}
+
 pub struct Instance {
     pub n: usize,
     pub a: Vec<C>, // first matrix, row-major n×n
@@ -24,6 +30,9 @@ pub struct Instance {
     /// Both matrices symmetric with zero diagonal (most QAPLIB instances).
     /// Halves the arithmetic of the swap deltas and of Taillard's update.
     pub symmetric: bool,
+    /// Transposes of `a` and `b`: column reads become row reads.
+    pub at: Vec<C>,
+    pub bt: Vec<C>,
 }
 
 impl Instance {
@@ -32,7 +41,16 @@ impl Instance {
             (0..n).all(|i| m[i * n + i] == 0 && (i + 1..n).all(|j| m[i * n + j] == m[j * n + i]))
         };
         let symmetric = sym(&a) && sym(&b);
-        Instance { n, a, b, symmetric }
+        let t = |m: &[C]| (0..n * n).map(|k| m[(k % n) * n + k / n]).collect();
+        let (at, bt) = (t(&a), t(&b));
+        Instance {
+            n,
+            a,
+            b,
+            symmetric,
+            at,
+            bt,
+        }
     }
 
     /// cost(p) = Σ a[i][j] · b[p[i]][p[j]]
@@ -57,13 +75,24 @@ impl Instance {
         }
     }
 
-    /// General (asymmetric) formula: 4 products per k.
+    /// General (asymmetric) formula, 2 products per k:
+    /// Σ (a[k][r] − a[k][s])(b[pk][ps] − b[pk][pr]) + (a[r][k] − a[s][k])(b[ps][pk] − b[pr][pk]).
+    /// Columns are read as rows of the transposes, so every access is row-wise.
     fn swap_delta_gen(&self, p: &[usize], r: usize, s: usize) -> C {
         let n = self.n;
         let (pr, ps) = (p[r], p[s]);
-        // row slices: bounds are checked once here, not in the loop
-        let (ar, as_) = (&self.a[r * n..][..n], &self.a[s * n..][..n]);
-        let (br, bs) = (&self.b[pr * n..][..n], &self.b[ps * n..][..n]);
+        let (ar, as_, atr, ats) = (
+            row(&self.a, r, n),
+            row(&self.a, s, n),
+            row(&self.at, r, n),
+            row(&self.at, s, n),
+        );
+        let (br, bs, btr, bts) = (
+            row(&self.b, pr, n),
+            row(&self.b, ps, n),
+            row(&self.bt, pr, n),
+            row(&self.bt, ps, n),
+        );
         let mut d = ar[r] * (bs[ps] - br[pr])
             + ar[s] * (bs[pr] - br[ps])
             + as_[r] * (br[ps] - bs[pr])
@@ -72,11 +101,7 @@ impl Instance {
             if k == r || k == s {
                 continue;
             }
-            let bk = &self.b[pk * n..][..n];
-            d += self.a[k * n + r] * (bk[ps] - bk[pr])
-                + self.a[k * n + s] * (bk[pr] - bk[ps])
-                + ar[k] * (bs[pk] - br[pk])
-                + as_[k] * (br[pk] - bs[pk]);
+            d += (atr[k] - ats[k]) * (bts[pk] - btr[pk]) + (ar[k] - as_[k]) * (bs[pk] - br[pk]);
         }
         d
     }
@@ -240,6 +265,7 @@ pub struct QapTaillard<'a> {
     pub inst: &'a Instance,
     pub p: Vec<usize>,
     delta: Vec<C>, // delta[r*n+s] for r<s
+    work: Vec<C>,  // scratch of `swap`
 }
 
 impl<'a> QapTaillard<'a> {
@@ -251,7 +277,12 @@ impl<'a> QapTaillard<'a> {
                 delta[r * n + s] = inst.swap_delta(&p, r, s);
             }
         }
-        QapTaillard { inst, p, delta }
+        QapTaillard {
+            inst,
+            p,
+            delta,
+            work: Vec::new(),
+        }
     }
 }
 
@@ -276,24 +307,48 @@ impl Permutation for QapTaillard<'_> {
         self.p.swap(u, v);
         let p = &self.p;
         let (pu, pv) = (p[u], p[v]);
-        // Taillard's O(1) update for pairs disjoint from {u, v}, O(n) otherwise
+        // Taillard's O(1) update for pairs disjoint from {u, v} factors into
+        // per-position differences, computed once per swap so that the inner
+        // loop reads contiguous memory:
+        //   fa(r, s) = ca[r] − ca[s],  ca[k] = a[k][u] − a[k][v]
+        //   fb(r, s) = cb[s] − cb[r],  cb[k] = b[p[k]][pu] − b[p[k]][pv]
+        // (and the transposed terms ra, rb for asymmetric instances).
+        let w = &mut self.work;
+        w.resize(4 * n, 0);
+        let (ca, rest) = w.split_at_mut(n);
+        let (cb, rest) = rest.split_at_mut(n);
+        let (ra, rb) = rest.split_at_mut(n);
+        let (at, bt) = (&inst.at, &inst.bt);
+        let (atu, atv, au, av) = (row(at, u, n), row(at, v, n), row(a, u, n), row(a, v, n));
+        let (btu, btv, bu, bv) = (row(bt, pu, n), row(bt, pv, n), row(b, pu, n), row(b, pv, n));
+        for (k, &pk) in p.iter().enumerate() {
+            ca[k] = atu[k] - atv[k]; // a[k][u] − a[k][v]
+            cb[k] = btu[pk] - btv[pk]; // b[pk][pu] − b[pk][pv]
+            ra[k] = au[k] - av[k];
+            rb[k] = bu[pk] - bv[pk];
+        }
         for r in 0..n {
-            let pr = p[r];
-            for s in r + 1..n {
-                let d = &mut self.delta[r * n + s];
-                if r == u || r == v || s == u || s == v {
-                    *d = inst.swap_delta(p, r, s);
-                    continue;
+            if r == u || r == v {
+                continue;
+            }
+            let row = &mut self.delta[r * n..(r + 1) * n];
+            let (car, cbr, rar, rbr) = (ca[r], cb[r], ra[r], rb[r]);
+            if inst.symmetric {
+                for s in r + 1..n {
+                    row[s] += 2 * (car - ca[s]) * (cb[s] - cbr);
                 }
-                let ps = p[s];
-                let fa = a[r * n + u] - a[r * n + v] + a[s * n + v] - a[s * n + u];
-                let fb = b[ps * n + pu] - b[ps * n + pv] + b[pr * n + pv] - b[pr * n + pu];
-                if inst.symmetric {
-                    *d += 2 * fa * fb;
-                } else {
-                    *d += fa * fb
-                        + (a[u * n + r] - a[v * n + r] + a[v * n + s] - a[u * n + s])
-                            * (b[pu * n + ps] - b[pv * n + ps] + b[pv * n + pr] - b[pu * n + pr]);
+            } else {
+                for s in r + 1..n {
+                    row[s] += (car - ca[s]) * (cb[s] - cbr) + (rar - ra[s]) * (rb[s] - rbr);
+                }
+            }
+        }
+        // pairs that touch u or v: O(n) each (overwrites the entries above)
+        for k in 0..n {
+            for x in [u, v] {
+                if k != x {
+                    let (r, s) = (k.min(x), k.max(x));
+                    self.delta[r * n + s] = inst.swap_delta(p, r, s);
                 }
             }
         }

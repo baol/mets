@@ -1034,6 +1034,22 @@ independent runs on 4 threads, best of them; times are wall-clock.
 
   Ties, not records: these values have stood for decades. tho150 under the
   same 55-minute budget ended at 8,133,702, 0.004% above its 8,133,398.
+* Speed against Taillard's robust tabu search in C (`gcc -O3
+  -march=native`, same parameters and update), 10,000 iterations, one core:
+
+  | instance | n | C, it/s | `RobustTabuSearch` + `QapTaillard`, it/s |
+  |---|---|---|---|
+  | tai50a | 50 | 64,000 | 84,000 |
+  | tai100a | 100 | 16,000 | 21,000 |
+  | tai150b (asymmetric) | 150 | 7,600 | 6,600–7,200 |
+  | tai256c (asymmetric) | 256 | 1,900 | 1,900 |
+
+  The library's tabu search costs nothing over hand-written C. The model's
+  update reads only rows: Taillard's O(1) term factors into per-position
+  differences computed once per swap, and columns are read from stored
+  transposes. A 50-minute `memetic` run (4 runs, 4 threads) on tai100a ends
+  at 21,118,120, 0.31% above the best known: the "a" instances, where
+  records still move, need a stronger search, not a faster one.
 * Islands (`--migrate-every G`, `parallel::islands`): 4 islands against 4
   independent `ma` runs, wall time to the best-known value, 5 trials each:
 
