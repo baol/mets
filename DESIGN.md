@@ -1055,6 +1055,11 @@ independent runs on 4 threads, best of them; times are wall-clock.
   transposes. A 50-minute `memetic` run (4 runs, 4 threads) on tai100a ends
   at 21,118,120, 0.31% above the best known: the "a" instances, where
   records still move, need a stronger search, not a faster one.
+* Cohesive crossover (`perm::CohesiveCrossover`, Drezner; `--crossover
+  cohesive`): on sko100a with `ma` (4 runs, 4 threads), time to the best
+  known over 5 seeds, uniform 43.6 s mean (45.4 median), cohesive 57.9 s
+  (53.2). No gain with `ma`'s first-improvement descent; Drezner pairs it
+  with a tabu search, which `memetic` and `qap_gpu` use.
 * Islands (`--migrate-every G`, `parallel::islands`): 4 islands against 4
   independent `ma` runs, wall time to the best-known value, 5 trials each:
 

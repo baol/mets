@@ -230,7 +230,14 @@ C2000.5, and the polish/VSS behaviour at k − 1. Any legal k − 1 colouring is
 saved and must be verified independently (`is_legal` already checks; also
 re-check the saved file with a separate script).
 
-## Q1. QAP: cohesive crossover (Drezner) for structured instances
+## Q1. QAP: cohesive crossover (Drezner) for structured instances (implemented)
+
+Implemented as specified. First measurement, sko100a with `ma`, 5 seeds:
+uniform 43.6 s mean to the best known, cohesive 57.9 s: no gain with a
+descent as the improvement. Still to test: with tabu improvement
+(`qap_advanced --method memetic --crossover cohesive`, `qap_gpu
+--crossover cohesive`) on tho150.
+
 
 **Why.** tho150 is 0.004% from its best known; sko/wil/tho have grid distance
 matrices. The record-setting method on these families is Drezner's hybrid
