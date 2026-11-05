@@ -1034,11 +1034,26 @@ independent runs on 4 threads, best of them; times are wall-clock.
   | sko100a | 5/5, 233 s (101–384) | 0/30 in 161 s |
 
   Our timer has 0.1 s resolution. A Pentium II at 300 MHz is very roughly
-  30–50× slower per core than this VM, so after normalising we are
-  comparable or faster on the small instances, more reliable everywhere, but
-  *slower per unit of hardware* on the large `tai*b` instances (3.5–6.6× raw).
-  Their memetic algorithm is cheaper per child: first-improvement swaps with
-  don't-look bits, restricted to the positions where the parents differ.
+  30–50× slower per core than this VM, so after normalising this robust-tabu
+  memetic search is comparable or faster on the small instances, more
+  reliable everywhere, but *slower per unit of hardware* on the large `tai*b`
+  instances (3.5–6.6× raw). Their algorithm is cheaper per child.
+* `--method ma` reproduces it from library pieces: `Memetic` (population 40,
+  uniform crossover, Hamming distance, renewal) around `perm::SwapDescent`
+  (first-improvement swaps with don't-look bits) on the plain model. Same
+  measurement (5 seeds, one core):
+
+  | instance | `ma`: reached, avg (min–max) |
+  |---|---|
+  | tai60b | 5/5, 0.9 s (0.3–2.4) |
+  | tai80b | 5/5, 9.0 s (5.1–15.7) |
+  | tai100b | 5/5, 36 s (8.7–71) |
+  | sko100a | 4/5, 96 s (45–164); one run ended its 100,000 children 34 above |
+  | bur26a, chr25a, kra30a, nug30, ste36a | 5/5, ≤ 0.3 s |
+
+  That is 3–7× faster than the robust-tabu memetic search on `tai*b`, and
+  18–29× faster than the 1999 results in raw time: about on par per unit of
+  hardware, as a faithful reimplementation should be, and more reliable.
 * Compared with the `QAPLIB.md` setup (`qap`, 200 restarts of position-pair
   tabu search), restarts of robust tabu search reach better costs on 9 of 12
   hard instances at about the same CPU time, including `tai100b`'s

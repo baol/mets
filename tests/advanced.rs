@@ -433,3 +433,17 @@ fn random_ties_are_reproducible_and_explore_plateaus() {
         .run();
     assert_eq!(walk(3).0[0], plain.current().cost());
 }
+
+#[test]
+fn swap_descent_reaches_a_local_optimum_of_the_swap_neighborhood() {
+    for seed in 1..4 {
+        let mut st = State::new(Sort(reversed(25)), seed);
+        st.modify_current(shuffle);
+        let out = perm::SwapDescent::new().runner(&mut st).run();
+        assert_eq!(out.stop, Stop::Stuck);
+        for (_, d) in collect_moves(&mut SwapNeighborhood, st.current()) {
+            assert!(d >= 0, "an improving swap is left");
+        }
+        assert_eq!(st.current().cost(), st.current().evaluate());
+    }
+}

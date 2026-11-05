@@ -489,3 +489,62 @@ impl<S: Permutation> Crossover<S> for PathRelinking {
         }
     }
 }
+
+// ------------------------------------------------------------ swap descent
+
+/// First-improvement descent on swaps with don't-look bits (Bentley; as in
+/// Merz & Freisleben's memetic algorithm for the QAP): positions are visited
+/// in turn, and the first improving swap involving the current position is
+/// taken. A position whose swaps were all checked without improvement gets
+/// its don't-look bit set and is skipped until a move touches it again. One
+/// `step` is one move; the run ends with `Stop::Stuck` at a local optimum.
+///
+/// Much cheaper per step than a full best-improvement scan, which makes it the
+/// usual improvement method inside a memetic search. Use a model with a
+/// cheap swap (O(1) apply).
+#[derive(Clone, Debug, Default)]
+pub struct SwapDescent {
+    dont_look: Vec<bool>,
+    next: usize,
+}
+
+impl SwapDescent {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<S: Permutation, R: Rng> Search<S, R> for SwapDescent {
+    fn step(&mut self, st: &mut State<S, R>, obs: &mut dyn Observer<S, R>) -> Step {
+        let n = self.dont_look.len();
+        let threshold = -st.tolerance();
+        for offset in 0..n {
+            let i = (self.next + offset) % n;
+            if self.dont_look[i] {
+                continue;
+            }
+            let cur = st.current();
+            let found = (0..n).filter(|&j| j != i).find_map(|j| {
+                let m = Swap::new(i, j);
+                let d = cur.delta_of(&m);
+                (d < threshold).then_some((m, d))
+            });
+            match found {
+                Some((m, d)) => {
+                    self.dont_look[m.i] = false;
+                    self.dont_look[m.j] = false;
+                    self.next = i;
+                    return st.commit(&m, d, obs);
+                }
+                None => self.dont_look[i] = true,
+            }
+        }
+        Step::Stuck
+    }
+
+    fn start(&mut self, st: &mut State<S, R>) {
+        self.dont_look.clear();
+        self.dont_look.resize(st.current().size(), false);
+        self.next = 0;
+    }
+}

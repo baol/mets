@@ -9,6 +9,9 @@
 //!   members stay at least n/10 positions apart (`perm::hamming`).
 //! * `restarts`: the same improvement, restarted from random permutations
 //!   (the baseline the crossover replaces).
+//! * `ma`: Merz & Freisleben's memetic algorithm (1999): population 40,
+//!   uniform crossover, `perm::SwapDescent` (first improvement, don't-look
+//!   bits) on the plain model, renewal after 30 children without insertion.
 //! * `lns`: large neighborhood search with `perm::BestRearrangement`: every
 //!   step moves to the best other arrangement of k random positions (all
 //!   k! − 1 of them are tried), accepted by late acceptance over 10n
@@ -23,9 +26,9 @@
 //!   qap_advanced FILE.dat [FILE.sln] [options]         solve one instance
 //!   qap_advanced --qaplib DATA_DIR SOLN_DIR [options]  solve every instance
 //! options:
-//!   --method M     memetic | restarts | lns (default memetic)
-//!   --steps N      per run: children / restarts (default 50), or rebuilds for lns (default 1500000)
-//!   --population P memetic: population size (default 10)
+//!   --method M     memetic | restarts | lns | ma (default memetic)
+//!   --steps N      per run: children / restarts (default 50; ma 100000), or rebuilds for lns (default 1500000)
+//!   --population P memetic / ma: population size (default 10; ma 40)
 //!   --crossover X  memetic: uniform | path (path relinking half-way, DE-style) (default uniform)
 //!   --replacement Y  memetic: niche (closest member or worst) | parent (DE one-to-one) (default niche)
 //!   --k K          lns: positions rearranged per step (default 5)
@@ -52,6 +55,8 @@ enum Method {
     Memetic,
     Restarts,
     Lns,
+    /// Merz & Freisleben (1999): population 40, swap descent with don't-look bits.
+    Ma,
 }
 
 struct Settings {
@@ -162,6 +167,25 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
             .run();
             st.global_best().cost()
         }
+        Method::Ma => {
+            // many cheap moves: the plain model's O(1) swap fits it better
+            let mut st = State::new(QapPlain { inst, p: start }, seed);
+            let fresh = perturb_with(|s: &mut Evaluated<QapPlain>, rng| shuffle(s, rng));
+            Memetic::new(
+                perm::SwapDescent::new(),
+                cancel,
+                fresh,
+                set.crossover,
+                set.population,
+            )
+            .with_distance(|a: &QapPlain, b: &QapPlain| perm::hamming(a, b), n / 10)
+            .renew_after(30)
+            .runner(&mut st)
+            .until(steps)
+            .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
+            .run();
+            st.global_best().cost()
+        }
     }
 }
 
@@ -200,13 +224,16 @@ fn main() {
         None | Some("memetic") => Method::Memetic,
         Some("restarts") => Method::Restarts,
         Some("lns") => Method::Lns,
+        Some("ma") => Method::Ma,
         Some(m) => panic!("unknown method {m:?} (memetic, restarts, lns)"),
     };
     let set = Settings {
         method,
-        steps: args
-            .value("--steps")
-            .unwrap_or(if method == Method::Lns { 1_500_000 } else { 50 }),
+        steps: args.value("--steps").unwrap_or(match method {
+            Method::Lns => 1_500_000,
+            Method::Ma => 100_000,
+            _ => 50,
+        }),
         runs: args.value("--runs").unwrap_or(4),
         first_seed: args.value("--first-seed").unwrap_or(1),
         jobs: args
@@ -214,7 +241,9 @@ fn main() {
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
         stop_at_best: !run_to_end,
         k: args.value("--k").unwrap_or(5),
-        population: args.value("--population").unwrap_or(10),
+        population: args
+            .value("--population")
+            .unwrap_or(if method == Method::Ma { 40 } else { 10 }),
         crossover: match args.value::<String>("--crossover").as_deref() {
             None | Some("uniform") => Recombine::Uniform,
             Some("path") => Recombine::Path,
@@ -232,6 +261,7 @@ fn main() {
             "memetic of iterated robust tabu search"
         }
         Method::Restarts => "random restarts of iterated robust tabu search",
+        Method::Ma => "Merz & Freisleben memetic (swap descent with don't-look bits)",
         Method::Lns => {
             "large neighborhood search (best other arrangement of k random positions, late acceptance)"
         }
