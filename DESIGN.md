@@ -1012,6 +1012,10 @@ independent runs on 4 threads, best of them; times are wall-clock.
   shorter acceptance histories were worse at the same time. This matches the
   literature, where tabu search on swaps is the strongest local method for
   the QAP.
+* Long runs (4 runs × 2000 children, memetic with Hamming-distance diversity,
+  `--run-to-end`) reach the best-known value exactly on three open
+  instances that the 200-restart table missed: `tai80b` 818,415,043 (24 min),
+  `sko81` 90,998 (16 min), `sko90` 115,534 (18 min). Ties, not records.
 * Compared with the `QAPLIB.md` setup (`qap`, 200 restarts of position-pair
   tabu search), restarts of robust tabu search reach better costs on 9 of 12
   hard instances at about the same CPU time, including `tai100b`'s
