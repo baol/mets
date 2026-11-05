@@ -1016,6 +1016,29 @@ independent runs on 4 threads, best of them; times are wall-clock.
   `--run-to-end`) reach the best-known value exactly on three open
   instances that the 200-restart table missed: `tai80b` 818,415,043 (24 min),
   `sko81` 90,998 (16 min), `sko90` 115,534 (18 min). Ties, not records.
+* Time to the best-known value, one core per run, 5 seeds, memetic search
+  stopping at the target (`--runs 1 --jobs 1 --first-seed s`), against
+  Merz & Freisleben's memetic algorithm (CEC 1999, Table 2: one core of a
+  300 MHz Pentium II, 30 runs):
+
+  | instance | ours: reached, avg (min–max) | theirs: reached, avg (min) |
+  |---|---|---|
+  | bur26a | 5/5, 0.04 s (0–0.1) | 30/30, 1.0 s (0.2) |
+  | chr25a | 5/5, 0.3 s (0.1–0.5) | 29/30, 2.6 s (0.3) |
+  | kra30a | 5/5, 0.06 s | 30/30, 2.7 s |
+  | nug30 | 5/5, 0.1 s | 27/30, 7.1 s |
+  | ste36a | 5/5, 0.08 s | 17/30, 36.7 s |
+  | tai60b | 5/5, 6.5 s (1.7–12.8) | 30/30, 23.2 s (7.5) |
+  | tai80b | 5/5, 52 s (31–85) | 20/30, 258 s (55) |
+  | tai100b | 5/5, 95 s (33–282) | 14/30, 629 s (58) |
+  | sko100a | 5/5, 233 s (101–384) | 0/30 in 161 s |
+
+  Our timer has 0.1 s resolution. A Pentium II at 300 MHz is very roughly
+  30–50× slower per core than this VM, so after normalising we are
+  comparable or faster on the small instances, more reliable everywhere, but
+  *slower per unit of hardware* on the large `tai*b` instances (3.5–6.6× raw).
+  Their memetic algorithm is cheaper per child: first-improvement swaps with
+  don't-look bits, restricted to the positions where the parents differ.
 * Compared with the `QAPLIB.md` setup (`qap`, 200 restarts of position-pair
   tabu search), restarts of robust tabu search reach better costs on 9 of 12
   hard instances at about the same CPU time, including `tai100b`'s
