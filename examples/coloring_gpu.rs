@@ -15,6 +15,7 @@
 //!   --seed S         (default 1)
 //!   --threads T      GPU threads per block (default 128)
 //!   --cpu            improve on the CPU threads instead of the GPU
+//! A legal colouring is verified and saved as NAME.K.sol ("vertex colour", 1-based).
 //!   --trace FILE     append one line per batch: time, cost spread, and a CPU
 //!                    recount of a few returned colourings (mismatches = kernel bug)
 //!
@@ -493,8 +494,20 @@ fn main() {
             is_legal(&g, &best.1) && best.1.iter().all(|&c| c < k),
             "verified legal"
         );
+        // one line per vertex, 1-based: "vertex colour"
+        let name = std::path::Path::new(file)
+            .file_stem()
+            .map_or("graph".into(), |s| s.to_string_lossy());
+        let out = format!("{name}.{k}.sol");
+        let text: String = best
+            .1
+            .iter()
+            .enumerate()
+            .map(|(v, c)| format!("{} {}\n", v + 1, c + 1))
+            .collect();
+        std::fs::write(&out, text).unwrap_or_else(|e| panic!("{out}: {e}"));
         println!(
-            "{file}: legal {k}-colouring in {:.1} s",
+            "{file}: legal {k}-colouring in {:.1} s, saved to {out}",
             t0.elapsed().as_secs_f64()
         );
     } else {
