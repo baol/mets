@@ -131,16 +131,22 @@ extern "C" __global__ void rots(
     const ll* __restrict__ a, const ll* __restrict__ b,
     const ll* __restrict__ at, const ll* __restrict__ bt, int n,
     int* best_perm, ll* delta_all, int* tabu_all, ll* out_cost,
-    long long iters, unsigned int seed)
+    long long iters, unsigned int seed, int use_shared)
 {
     const int blk = blockIdx.x, t = threadIdx.x, T = blockDim.x;
     const int lane = t & 31, warp = t >> 5, warps = T >> 5;
     const int nn = n * n;
     extern __shared__ __align__(8) unsigned char smem[];
+    // shared: ca, cb, ra, rb (n each), the delta matrix as a triangle of
+    // n(n-1)/2 entries when it fits (use_shared), then p
+    const int tri = n * (n - 1) / 2;
     ll* ca = (ll*)smem; ll* cb = ca + n; ll* ra = cb + n; ll* rb = ra + n;
-    int* p = (int*)(rb + n);
+    ll* Dt = rb + n;
+    int* p = (int*)(Dt + (use_shared ? tri : 0));
     int* best = best_perm + (size_t)blk * n;
-    ll* D = delta_all + (size_t)blk * nn;     // D[i*n + j], i < j
+    // D[TRI(i, j)], i < j: the swap deltas, a triangle in shared or global memory
+    ll* D = use_shared ? Dt : delta_all + (size_t)blk * tri;
+#define TRI(i, j) ((i) * (2 * n - (i) - 1) / 2 + (j) - (i) - 1)
     int* tb = tabu_all + (size_t)blk * nn;    // tb[i*n + e]: element e may return to i after it
     __shared__ u64 sel;
     __shared__ ll cur, bestc;
@@ -167,7 +173,7 @@ extern "C" __global__ void rots(
             const int i = q / n, j = q - i * n;
             if (i >= j) continue;
             const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane);
-            if (lane == 0) D[q] = d;
+            if (lane == 0) D[TRI(i, j)] = d;
         }
     }
     __syncthreads();
@@ -185,7 +191,7 @@ extern "C" __global__ void rots(
         for (int q = t; q < nn; q += T) {
             const int i = q / n, j = q - i * n;
             if (j <= i) continue;
-            const ll d = D[q];
+            const ll d = D[TRI(i, j)];
             const int ti = tb[i * n + p[j]], tj = tb[j * n + p[i]];  // p[j] back to i, p[i] back to j
             const bool aspired = ti < it - asp || tj < it - asp || c0 + d < bc;
             const bool authorized = ti < it || tj < it;
@@ -208,7 +214,7 @@ extern "C" __global__ void rots(
             tb[u * n + p[u]] = (int)(it + tenure);  // p[u] leaves u
             tb[v * n + p[v]] = (int)(it + tenure);  // p[v] leaves v
             const int x = p[u]; p[u] = p[v]; p[v] = x;
-            cur += D[q];
+            cur += D[TRI(u, v)];
         }
         __syncthreads();
         // per-position differences of the swap (p is already swapped)
@@ -225,7 +231,7 @@ extern "C" __global__ void rots(
         for (int q2 = t; q2 < nn; q2 += T) {
             const int i = q2 / n, j = q2 - i * n;
             if (j <= i || i == u || i == v || j == u || j == v) continue;
-            D[q2] += (ca[i] - ca[j]) * (cb[j] - cb[i]) + (ra[i] - ra[j]) * (rb[j] - rb[i]);
+            D[TRI(i, j)] += (ca[i] - ca[j]) * (cb[j] - cb[i]) + (ra[i] - ra[j]) * (rb[j] - rb[i]);
         }
         // ... and the 2n - 3 pairs touching u or v from scratch, one per warp:
         // slots m < n - 1 are the pairs (u, k), k != u; slots n - 1 .. 2n - 3
@@ -237,7 +243,7 @@ extern "C" __global__ void rots(
             if (x == v && k == u) continue;
             const int i = min(x, k), j = max(x, k);
             const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane);
-            if (lane == 0) D[i * n + j] = d;
+            if (lane == 0) D[TRI(i, j)] = d;
         }
         __syncthreads();
         const bool improved = cur < bestc;
@@ -249,6 +255,7 @@ extern "C" __global__ void rots(
         __syncthreads();
     }
     if (t == 0) out_cost[blk] = bestc;
+#undef TRI
 }
 "#;
 
@@ -267,6 +274,7 @@ extern "C" __global__ void rots(
         p: usize,
         threads: u32,
         shared_bytes: u32,
+        use_shared: bool,
         resident: String,
         host: Vec<i32>,
         device: String,
@@ -285,7 +293,20 @@ extern "C" __global__ void rots(
             let stream = ctx.default_stream();
             let ptx = cudarc::nvrtc::compile_ptx(KERNEL)?;
             let f = ctx.load_module(ptx)?.load_function("rots")?;
-            let shared_bytes = (36 * n) as u32; // ca, cb, ra, rb (i64) and p (i32)
+            // ca, cb, ra, rb (i64) and p (i32), plus the delta triangle if it fits
+            let tri = n * (n - 1) / 2;
+            let optin = ctx.attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            )? as usize;
+            let with_delta = 36 * n + 8 * tri;
+            let use_shared = with_delta <= optin;
+            let shared_bytes = if use_shared { with_delta } else { 36 * n } as u32;
+            if shared_bytes > 48 * 1024 {
+                f.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    shared_bytes as i32,
+                )?;
+            }
             let blocks_per_sm = f.occupancy_max_active_blocks_per_multiprocessor(
                 threads,
                 shared_bytes as usize,
@@ -300,7 +321,7 @@ extern "C" __global__ void rots(
                 at: stream.clone_htod(&inst.at)?,
                 bt: stream.clone_htod(&inst.bt)?,
                 best: stream.alloc_zeros(p * n)?,
-                delta: stream.alloc_zeros(p * n * n)?,
+                delta: stream.alloc_zeros(if use_shared { 1 } else { p * tri })?,
                 tabu: stream.alloc_zeros(p * n * n)?,
                 cost: stream.alloc_zeros(p)?,
                 stream,
@@ -309,7 +330,12 @@ extern "C" __global__ void rots(
                 p,
                 threads,
                 shared_bytes,
-                resident: format!("{blocks_per_sm} blocks per SM × {sms} SMs"),
+                use_shared,
+                resident: format!(
+                    "delta matrix in {} memory ({} KB shared per block), {blocks_per_sm} blocks per SM × {sms} SMs",
+                    if use_shared { "shared" } else { "global" },
+                    shared_bytes.div_ceil(1024)
+                ),
                 host: vec![0; p * n],
                 device,
             })
@@ -330,6 +356,7 @@ extern "C" __global__ void rots(
             }
             self.stream.memcpy_htod(&self.host, &mut self.best)?;
             let (n32, iters, seed) = (n as i32, iters as i64, seed as u32);
+            let use_shared = self.use_shared as i32;
             let mut launch = self.stream.launch_builder(&self.f);
             launch
                 .arg(&self.a)
@@ -342,7 +369,8 @@ extern "C" __global__ void rots(
                 .arg(&mut self.tabu)
                 .arg(&mut self.cost)
                 .arg(&iters)
-                .arg(&seed);
+                .arg(&seed)
+                .arg(&use_shared);
             let cfg = LaunchConfig {
                 grid_dim: (self.p as u32, 1, 1),
                 block_dim: (self.threads, 1, 1),
