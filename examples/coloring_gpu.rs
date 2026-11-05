@@ -145,6 +145,7 @@ extern "C" __global__ void tabucol(
         __syncthreads();
         // best admissible recolouring of a conflicting vertex
         u64 local = ~0ull;
+        int local_d = 0x7fffffff;  // delta of `local`: worse moves need no tabu read
         const int fv = f, bf = bestf;
         for (int v = t; v < n; v += T) {
             const int cv = col[v];
@@ -155,11 +156,12 @@ extern "C" __global__ void tabucol(
             for (int c = 0; c < k; c++) {
                 if (c == cv) continue;
                 const int d = gv[c] - own;
+                if (d > local_d) continue;
                 if (tv[c] < it || fv + d < bf) {  // not tabu, or aspired
                     u64 key = ((u64)(unsigned)(d + (1 << 20)) << 40)
                             | ((u64)(xs(rng) & 0xFFFFFu) << 20)
                             | (u64)(v * k + c);
-                    if (key < local) local = key;
+                    if (key < local) { local = key; local_d = d; }
                 }
             }
         }
