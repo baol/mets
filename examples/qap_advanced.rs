@@ -43,6 +43,8 @@
 //!                  results then depend on thread timing)
 //!   --jobs J       threads (default: all cores)
 //!   --run-to-end   do not stop at the best-known value
+//!   --max-seconds T  also stop each run after T seconds and report its best
+//!                  (results then depend on timing)
 //!   --markdown     --qaplib only: print a Markdown table
 
 #[path = "common/qap.rs"]
@@ -78,6 +80,8 @@ struct Settings {
     migration: Migration,
     /// ma islands: post/take mailboxes instead of synchronised exchanges.
     async_migration: bool,
+    /// Wall-clock cap per run, in seconds (results then depend on timing).
+    max_seconds: Option<f64>,
     jobs: usize,
     stop_at_best: bool,
     /// lns: positions rearranged per step.
@@ -137,7 +141,13 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
     let n = inst.n;
     let fresh = || perturb_with(|s: &mut Evaluated<QapTaillard>, rng| shuffle(s, rng));
     let start = random_start(n, seed);
-    let steps = MaxIterations::new(set.steps).or(cancel);
+    // count-based, plus an optional wall-clock cap that still reports the result
+    let cap = set
+        .max_seconds
+        .map_or(std::time::Duration::MAX, std::time::Duration::from_secs_f64);
+    let steps = MaxIterations::new(set.steps)
+        .or(cancel)
+        .or(TimeLimit::new(cap));
     match set.method {
         Method::Memetic => {
             let mut st = State::new(QapTaillard::new(inst, start), seed);
@@ -340,6 +350,7 @@ fn main() {
             Some(x) => panic!("unknown migration {x:?} (replace, cross, part)"),
         },
         async_migration: args.flag("--async-migration"),
+        max_seconds: args.value("--max-seconds"),
         jobs: args
             .value("--jobs")
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
@@ -436,6 +447,7 @@ mod tests {
                 migrate_every: 0,
                 migration: Migration::Replace,
                 async_migration: false,
+                max_seconds: None,
                 jobs,
                 k: 5,
                 population: 4,
@@ -461,6 +473,7 @@ mod tests {
             migrate_every: 10,
             migration: Migration::Replace,
             async_migration: false,
+            max_seconds: None,
             jobs: 3,
             stop_at_best: false,
             k: 5,
@@ -482,6 +495,7 @@ mod tests {
             migrate_every: 0,
             migration: Migration::Replace,
             async_migration: false,
+            max_seconds: None,
             jobs: 2,
             k: 5,
             population: 4,
