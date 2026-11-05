@@ -194,7 +194,14 @@ Wire it in:
   (`DSJC500.5.47.sol`); that is a tie with the best known, and the signal
   that the machinery is ready for A2.
 
-## A2. Colouring: large DIMACS graphs on the GPU
+## A2. Colouring: large DIMACS graphs on the GPU (code done; GPU runs pending)
+
+Done: 24-bit move index (n·k < 16.7 M), device memory and occupancy in the
+trace's start line, GPX on the CPU threads with a seeded generator per
+chunk. The global-memory path was already wired. Limit kept: 8-bit colours
+(k < 256), so C4000.5 is out. Host loop checked with `--cpu` on DSJC250.5
+and DSJC1000.5.
+
 
 **Why.** 46 on DSJC500.5 would contradict a value believed optimal. The
 colouring values that moved in the last decade are on large graphs, and

@@ -178,8 +178,9 @@ extern "C" __global__ void tabucol(
             const int d = (int)gv[c] - (int)gv[cv];
             if (d > local_d) continue;
             if (tb[(size_t)v * k + c] < it || fv + d < bf) {  // not tabu, or aspired
-                u64 key = ((u64)(unsigned)(d + (1 << 20)) << 40)
-                        | ((u64)(xs(rng) & 0xFFFFFu) << 20)
+                // (delta + 2^23) | 16 random bits | 24-bit move index
+                u64 key = ((u64)(unsigned)(d + (1 << 23)) << 40)
+                        | ((u64)(xs(rng) & 0xFFFFu) << 24)
                         | (u64)(v * k + c);
                 if (key < local) { local = key; local_d = d; }
             }
@@ -192,8 +193,8 @@ extern "C" __global__ void tabucol(
         __syncthreads();
         const u64 s = sel;
         if (s == ~0ull) break;  // every move tabu and none aspired
-        const int idx = (int)(s & 0xFFFFFu), v = idx / k, c = idx % k;
-        const int d = (int)((s >> 40) & 0xFFFFFFu) - (1 << 20);
+        const int idx = (int)(s & 0xFFFFFFu), v = idx / k, c = idx % k;
+        const int d = (int)((s >> 40) & 0xFFFFFFu) - (1 << 23);
         const int old = col[v];
 
         // the neighbours of v: conflict table and conflicting-vertex count
@@ -257,7 +258,7 @@ extern "C" __global__ void tabucol(
         /// Buffers for a batch of `p` k-colourings of `g` on GPU 0.
         pub fn new(g: &Graph, k: usize, p: usize, threads: u32) -> Result<Self, Error> {
             let n = g.n();
-            assert!(n * k < 1 << 20, "move index must fit 20 bits");
+            assert!(n * k < 1 << 24, "move index must fit 24 bits");
             assert!(threads.is_multiple_of(32), "whole warps");
             let ctx = cudarc::driver::CudaContext::new(0)?;
             let device = ctx.name()?;
@@ -319,7 +320,19 @@ extern "C" __global__ void tabucol(
                 p,
                 threads,
                 shared_bytes,
-                resident: format!("{blocks_per_sm} blocks per SM × {sms} SMs"),
+                resident: {
+                    let table = if shared_bytes == 0 {
+                        3 * p * n + 2 * p * n * k
+                    } else {
+                        0
+                    };
+                    let bytes =
+                        4 * p * n * k + 4 * p * n + 8 * p + 4 * (n + 1 + 2 * g.edges) + table;
+                    format!(
+                        "{blocks_per_sm} blocks per SM × {sms} SMs, {} MB of device memory",
+                        bytes.div_ceil(1 << 20)
+                    )
+                },
                 host: vec![0; p * n],
                 device,
             })
@@ -575,9 +588,21 @@ fn main() {
             }
         }
         // HEAD: each member's child with its partner always replaces it
-        for i in 0..p {
-            gpx(&pop[i], &pop[i ^ 1], k, &mut children[i], &mut rng);
-        }
+        // GPX on the CPU threads, one seeded generator per chunk (reproducible)
+        let chunk = p.div_ceil(jobs).max(2) & !1; // whole pairs per chunk
+        let seeds: Vec<u64> = (0..p.div_ceil(chunk)).map(|_| rng.random()).collect();
+        std::thread::scope(|scope| {
+            for ((c, kids), &seed) in children.chunks_mut(chunk).enumerate().zip(&seeds) {
+                let pop = &pop;
+                scope.spawn(move || {
+                    let mut rng = DefaultRng::seed_from_u64(seed);
+                    for (j, child) in kids.iter_mut().enumerate() {
+                        let i = c * chunk + j;
+                        gpx(&pop[i], &pop[i ^ 1], k, child, &mut rng);
+                    }
+                });
+            }
+        });
         let t = Instant::now();
         costs = improver.improve(&mut children, iters, rng.random());
         trace.batch(
