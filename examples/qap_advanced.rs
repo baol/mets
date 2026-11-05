@@ -30,6 +30,7 @@
 //!   --replacement Y  memetic: niche (closest member or worst) | parent (DE one-to-one) (default niche)
 //!   --k K          lns: positions rearranged per step (default 5)
 //!   --runs R       independent runs (default 4)
+//!   --first-seed S seed of the first run; runs use S, S+1, … (default 1)
 //!   --jobs J       threads (default: all cores)
 //!   --run-to-end   do not stop at the best-known value
 //!   --markdown     --qaplib only: print a Markdown table
@@ -57,6 +58,8 @@ struct Settings {
     method: Method,
     steps: u64,
     runs: u64,
+    /// Seed of the first run (runs use first_seed, first_seed + 1, …).
+    first_seed: u64,
     jobs: usize,
     stop_at_best: bool,
     /// lns: positions rearranged per step.
@@ -173,7 +176,10 @@ fn solve(inst: &Instance, best_known: Option<C>, set: &Settings) -> Solved {
     let target = best_known.filter(|_| set.stop_at_best);
     let t0 = Instant::now();
     let results = run_many(set.runs, set.jobs, |r, cancel| {
-        (run(inst, r + 1, target, cancel, set), t0.elapsed())
+        (
+            run(inst, set.first_seed + r, target, cancel, set),
+            t0.elapsed(),
+        )
     });
     let (found, at) = results
         .into_iter()
@@ -202,6 +208,7 @@ fn main() {
             .value("--steps")
             .unwrap_or(if method == Method::Lns { 1_500_000 } else { 50 }),
         runs: args.value("--runs").unwrap_or(4),
+        first_seed: args.value("--first-seed").unwrap_or(1),
         jobs: args
             .value("--jobs")
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
@@ -291,6 +298,7 @@ mod tests {
                 method,
                 steps: 6,
                 runs: 3,
+                first_seed: 1,
                 jobs,
                 k: 5,
                 population: 4,
@@ -312,6 +320,7 @@ mod tests {
             method: Method::Memetic,
             steps: 6,
             runs: 3,
+            first_seed: 1,
             jobs: 2,
             k: 5,
             population: 4,
