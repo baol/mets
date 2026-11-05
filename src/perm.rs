@@ -10,9 +10,10 @@
 //!   arrangements of k random positions.
 //! * [`UniformCrossover`] and [`CohesiveCrossover`] (Drezner) for
 //!   [`Memetic`](crate::Memetic), and
-//!   [`adaptive_perturbation`] for [`IteratedSearch`](crate::IteratedSearch).
+//!   [`adaptive_perturbation`] and [`directed_perturbation`] (Benlic & Hao's
+//!   breakout local search) for [`IteratedSearch`](crate::IteratedSearch).
 
-use crate::ils::Adaptive;
+use crate::ils::{Adaptive, Perturbation};
 use crate::{
     Crossover, DefaultRng, DenseAttr, Evaluated, Model, Move, Neighborhood, Observer, Rebuild,
     Sampler, Search, State, Step, TabuAttr, Visitor,
@@ -167,6 +168,135 @@ pub fn adaptive_perturbation<S: Permutation>(n: usize) -> Adaptive<PerturbFn<S>,
 
 /// Number of positions where `a` and `b` differ: a distance for
 /// `Memetic::with_distance`.
+/// Breakout-style directed perturbation (Benlic & Hao's BLS for the QAP):
+/// each of the `strength` swaps is, with a probability that decreases while
+/// the search keeps returning to the same local optimum, the best swap (by
+/// delta) not used in the last `tenure` perturbation swaps, unless it leads
+/// below the best cost seen during this perturbation (aspiration); otherwise
+/// a random swap. The strength adapts as [`adaptive_perturbation`]'s: back
+/// to `min` when the incumbent changed, `+ step` (up to `max`) when not.
+///
+/// A directed swap scans all n(n−1)/2 swap deltas: cheap on a model with
+/// O(1) deltas (Taillard's delta matrix); a model without `swap_delta` gets
+/// random swaps only.
+#[derive(Clone, Debug)]
+pub struct DirectedPerturbation<C> {
+    pub min: usize,
+    pub step: usize,
+    pub max: usize,
+    /// Perturbation swaps during which a used swap stays forbidden.
+    pub tenure: u64,
+    strength: usize,
+    last: Option<C>,
+    /// Consecutive perturbations from the same incumbent cost.
+    returns: u32,
+    last_used: Vec<u64>,
+    moves: u64,
+}
+
+impl<C> DirectedPerturbation<C> {
+    pub fn new(min: usize, step: usize, max: usize, tenure: u64) -> Self {
+        DirectedPerturbation {
+            min,
+            step,
+            max: max.max(min),
+            tenure,
+            strength: min,
+            last: None,
+            returns: 0,
+            last_used: Vec::new(),
+            moves: 0,
+        }
+    }
+
+    /// The strength used by the last perturbation.
+    pub fn strength(&self) -> usize {
+        self.strength
+    }
+
+    /// Probability of a directed (rather than random) swap.
+    fn p_directed(&self) -> f64 {
+        (-(self.returns as f64) / 3.0).exp().max(0.2)
+    }
+}
+
+/// [`DirectedPerturbation`] with [`adaptive_perturbation`]'s strengths and a
+/// tenure of n/2 swaps.
+pub fn directed_perturbation<S: Permutation>(n: usize) -> DirectedPerturbation<S::Cost> {
+    DirectedPerturbation::new(
+        (n / 10).max(2),
+        (n / 20).max(1),
+        (n / 2).max(3),
+        (n / 2) as u64,
+    )
+}
+
+impl<S: Permutation> Perturbation<S> for DirectedPerturbation<S::Cost> {
+    fn perturb(&mut self, s: &mut Evaluated<S>, rng: &mut dyn RngCore) {
+        let cost = s.cost();
+        if self.last == Some(cost) {
+            self.strength = (self.strength + self.step).min(self.max);
+            self.returns += 1;
+        } else {
+            (self.strength, self.returns) = (self.min, 0);
+        }
+        self.last = Some(cost);
+        let n = s.size();
+        if n < 2 {
+            return;
+        }
+        if self.last_used.len() != n * n {
+            // "never used": far enough in the past for any tenure
+            self.last_used = vec![0; n * n];
+            self.moves = self.tenure + 1;
+        }
+        let p = self.p_directed();
+        let mut best_seen = s.cost();
+        for _ in 0..self.strength {
+            let directed = rng.random::<f64>() < p && s.swap_delta(0, 1).is_some();
+            let m = if directed {
+                let mut chosen: Option<(Swap, S::Cost)> = None;
+                let mut tied = 0u32;
+                for i in 0..n {
+                    for j in i + 1..n {
+                        let d = s.swap_delta(i, j).expect("swap deltas");
+                        let tabu = self.last_used[i * n + j] + self.tenure > self.moves;
+                        if tabu && s.cost() + d >= best_seen {
+                            continue;
+                        }
+                        match chosen {
+                            Some((_, b)) if d > b => {}
+                            Some((_, b)) if d == b => {
+                                // reservoir sampling among equal deltas
+                                tied += 1;
+                                if rng.random_range(0..tied) == 0 {
+                                    chosen = Some((Swap::new(i, j), d));
+                                }
+                            }
+                            _ => {
+                                chosen = Some((Swap::new(i, j), d));
+                                tied = 1;
+                            }
+                        }
+                    }
+                }
+                match chosen {
+                    Some((m, _)) => m,
+                    None => random_swap(n, rng).expect("n >= 2"),
+                }
+            } else {
+                random_swap(n, rng).expect("n >= 2")
+            };
+            s.apply(&m);
+            self.last_used[m.i * n + m.j] = self.moves;
+            self.moves += 1;
+            if s.cost() < best_seen {
+                best_seen = s.cost();
+            }
+        }
+    }
+}
+
 pub fn hamming<S: Permutation>(a: &S, b: &S) -> usize {
     a.as_slice()
         .iter()

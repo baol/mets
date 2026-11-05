@@ -32,6 +32,8 @@
 //!   --crossover X  memetic / ma: uniform | path (path relinking half-way, DE-style) |
 //!                  cohesive (Drezner: one parent's elements on a ball of close positions;
 //!                  uniform on instances without a distance matrix) (default uniform)
+//!   --perturbation P  memetic / restarts: random (adaptive random swaps) | directed
+//!                  (Benlic & Hao's breakout local search) (default random)
 //!   --replacement Y  memetic: niche (closest member or worst) | parent (DE one-to-one) (default niche)
 //!   --k K          lns: positions rearranged per step (default 5)
 //!   --runs R       independent runs (default 4)
@@ -94,6 +96,8 @@ struct Settings {
     crossover: Recombine,
     /// memetic: differential-evolution one-to-one selection.
     replace_parent: bool,
+    /// memetic / restarts: the iterated tabu search's perturbation.
+    perturbation: Perturb,
 }
 
 /// What a migrant does when it reaches an island.
@@ -150,13 +154,44 @@ impl<S: perm::Permutation> Crossover<S> for Recombiner {
 /// The improvement step of `memetic` and `restarts`: iterated robust tabu
 /// search, tabu runs of up to max(200, 2n) non-improving iterations, stopped
 /// after 20 perturbations without improvement.
-fn improvement<'a>(n: usize, cancel: &'a Cancel) -> impl Search<QapTaillard<'a>> + 'a {
+fn improvement<'a>(
+    n: usize,
+    cancel: &'a Cancel,
+    kind: Perturb,
+) -> impl Search<QapTaillard<'a>> + 'a {
+    let perturbation = match kind {
+        Perturb::Random => Perturber::Random(adaptive_perturbation(n)),
+        Perturb::Directed => Perturber::Directed(perm::directed_perturbation::<QapTaillard>(n)),
+    };
     IteratedSearch::new(
         RobustTabuSearch::new(),
         NoImprovement::new((2 * n as u64).max(200)).or(cancel),
-        adaptive_perturbation(n),
+        perturbation,
         Improving,
     )
+}
+
+/// The perturbation of the iterated tabu search, chosen at run time.
+#[derive(Clone, Copy, PartialEq)]
+enum Perturb {
+    /// `perm::adaptive_perturbation`: random swaps, adaptive count.
+    Random,
+    /// `perm::directed_perturbation`: Benlic & Hao's breakout local search.
+    Directed,
+}
+
+enum Perturber<'a> {
+    Random(Adaptive<perm::PerturbFn<QapTaillard<'a>>, C>),
+    Directed(perm::DirectedPerturbation<C>),
+}
+
+impl<'a> Perturbation<QapTaillard<'a>> for Perturber<'a> {
+    fn perturb(&mut self, s: &mut Evaluated<QapTaillard<'a>>, rng: &mut dyn mets::rand::RngCore) {
+        match self {
+            Perturber::Random(p) => p.perturb(s, rng),
+            Perturber::Directed(p) => p.perturb(s, rng),
+        }
+    }
 }
 
 /// One run with seed `seed`; returns the best cost found. Cancels every run
@@ -176,7 +211,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
         Method::Memetic => {
             let mut st = State::new(QapTaillard::new(inst, start), seed);
             let memetic = Memetic::new(
-                improvement(n, cancel),
+                improvement(n, cancel, set.perturbation),
                 NoImprovement::new(20).or(cancel),
                 fresh(),
                 Recombiner::new(set.crossover, inst),
@@ -202,7 +237,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
         Method::Restarts => {
             let mut st = State::new(QapTaillard::new(inst, start), seed);
             IteratedSearch::new(
-                improvement(n, cancel),
+                improvement(n, cancel, set.perturbation),
                 NoImprovement::new(20).or(cancel),
                 fresh(),
                 Always,
@@ -399,6 +434,11 @@ fn main() {
             Some("parent") => true,
             Some(x) => panic!("unknown replacement {x:?} (niche, parent)"),
         },
+        perturbation: match args.value::<String>("--perturbation").as_deref() {
+            None | Some("random") => Perturb::Random,
+            Some("directed") => Perturb::Directed,
+            Some(x) => panic!("unknown perturbation {x:?} (random, directed)"),
+        },
     };
     let args = args.0;
     let what = match set.method {
@@ -483,6 +523,8 @@ mod tests {
                 population: 4,
                 crossover: Recombine::Uniform,
                 replace_parent: false,
+                perturbation: Perturb::Random,
+                perturbation: Perturb::Random,
                 stop_at_best: false,
             };
             assert_eq!(
@@ -510,6 +552,7 @@ mod tests {
             population: 6,
             crossover: Recombine::Uniform,
             replace_parent: false,
+            perturbation: Perturb::Random,
         };
         assert_eq!(ma_islands(&inst, None, &set), ma_islands(&inst, None, &set));
     }
@@ -531,6 +574,7 @@ mod tests {
             population: 4,
             crossover: Recombine::Uniform,
             replace_parent: false,
+            perturbation: Perturb::Random,
             stop_at_best: true,
         };
         let found = solve(

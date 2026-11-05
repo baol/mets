@@ -564,3 +564,33 @@ fn cohesive_crossover_keeps_a_ball_of_one_parent() {
         std::mem::swap(&mut pa, &mut pb);
     }
 }
+
+#[test]
+fn directed_perturbation_adapts_and_does_not_undo_itself() {
+    let mut r = rng(12);
+    let mut x = perm::DirectedPerturbation::new(2, 1, 4, 10);
+    // from the optimum every swap worsens; the second directed swap may not
+    // undo the first (tabu, and undoing does not beat the best seen)
+    let mut s = Evaluated::new(Sort((0..12).collect()));
+    x.perturb(&mut s, &mut r);
+    assert_eq!(x.strength(), 2);
+    assert!(is_permutation(s.as_slice()));
+    assert!(s.cost() > 0, "the perturbation undid itself");
+    assert_eq!(s.cost(), s.evaluate(), "cached cost stays exact");
+    // the same incumbent cost again and again: the strength grows, up to max
+    let start = (*s).clone();
+    for want in [2, 3, 4, 4] {
+        let mut t = Evaluated::new(start.clone());
+        x.perturb(&mut t, &mut r);
+        assert_eq!(x.strength(), want);
+        assert_eq!(t.cost(), t.evaluate());
+    }
+    // a new incumbent cost resets it
+    let mut t = Evaluated::new(Sort(reversed(12)));
+    x.perturb(&mut t, &mut r);
+    assert_eq!(x.strength(), 2);
+    // without swap deltas it still perturbs (random swaps)
+    let mut f = Evaluated::new(SortFull((0..12).collect()));
+    perm::directed_perturbation::<SortFull>(12).perturb(&mut f, &mut r);
+    assert!(is_permutation(f.as_slice()) && f.cost() == f.evaluate());
+}
