@@ -1013,8 +1013,9 @@ independent runs on 4 threads, best of them; times are wall-clock.
   literature, where tabu search on swaps is the strongest local method for
   the QAP.
 * Long runs to the end (4 runs on 4 threads; `memetic` with 2,000 children
-  per run, or `ma` with 10⁶) reach the best-known value **exactly** on 11
-  open instances that the 200-restart table missed, and never go below it:
+  per run, or `ma` with 10⁶) reach the best-known value **exactly** on 12
+  open instances that the 200-restart table missed, and never go below it
+  (tai150b: `ma`, two jobs sharing 4 cores, stopped by `--max-seconds 3300`):
 
   | instance | best known | method, wall time |
   |---|---|---|
@@ -1029,8 +1030,10 @@ independent runs on 4 threads, best of them; times are wall-clock.
   | sko100e | 149,150 | memetic, 25 min |
   | sko100f | 149,036 | ma, 28 min |
   | wil100 | 273,038 | ma, 27 min |
+  | tai150b | 498,896,643 | ma, ≤ 55 min |
 
-  Ties, not records: these values have stood for decades.
+  Ties, not records: these values have stood for decades. tho150 under the
+  same 55-minute budget ended at 8,133,702, 0.004% above its 8,133,398.
 * Islands (`--migrate-every G`, `parallel::islands`): 4 islands against 4
   independent `ma` runs, wall time to the best-known value, 5 trials each:
 
