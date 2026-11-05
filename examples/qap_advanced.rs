@@ -36,6 +36,11 @@
 //!   --first-seed S seed of the first run; runs use S, S+1, … (default 1)
 //!   --migrate-every G  ma: the runs become islands in a ring, the best member
 //!                  migrating every G children (one thread per island; default 0: independent)
+//!   --migration M  ma islands: replace (migrant replaces the worst member) | cross (migrant
+//!                  is the second parent of the next child) | part (the child takes only 20%
+//!                  of the migrant, by path relinking) (default replace)
+//!   --async-migration  ma islands: mailboxes instead of synchronised exchanges (no waiting;
+//!                  results then depend on thread timing)
 //!   --jobs J       threads (default: all cores)
 //!   --run-to-end   do not stop at the best-known value
 //!   --markdown     --qaplib only: print a Markdown table
@@ -69,6 +74,10 @@ struct Settings {
     first_seed: u64,
     /// ma: run the runs as islands, migrating every this many children (0: independent).
     migrate_every: u64,
+    /// ma islands: what a migrant does on arrival.
+    migration: Migration,
+    /// ma islands: post/take mailboxes instead of synchronised exchanges.
+    async_migration: bool,
     jobs: usize,
     stop_at_best: bool,
     /// lns: positions rearranged per step.
@@ -79,6 +88,18 @@ struct Settings {
     crossover: Recombine,
     /// memetic: differential-evolution one-to-one selection.
     replace_parent: bool,
+}
+
+/// What a migrant does when it reaches an island.
+#[derive(Clone, Copy, PartialEq)]
+enum Migration {
+    /// It replaces the island's worst member (if better).
+    Replace,
+    /// It is the second parent of the next child (the island's crossover).
+    Cross,
+    /// Same, but the child takes only 20% of the migrant's differing
+    /// assignments (path relinking): a guided perturbation.
+    Part,
 }
 
 /// The two permutation recombinations of the library, chosen at run time.
@@ -223,6 +244,10 @@ fn ma_islands(inst: &Instance, target: Option<C>, set: &Settings) -> Vec<C> {
         )
         .with_distance(|a: &QapPlain, b: &QapPlain| perm::hamming(a, b), n / 10)
         .renew_after(30);
+        if set.migration == Migration::Part {
+            // take only a fifth of the migrant's differing assignments
+            ma = ma.with_migration_crossover(perm::PathRelinking { fraction: 0.2 });
+        }
         let epochs = set.steps.div_ceil(set.migrate_every);
         for epoch in 0..epochs {
             let r = ma
@@ -236,8 +261,21 @@ fn ma_islands(inst: &Instance, target: Option<C>, set: &Settings) -> Vec<C> {
             } else {
                 r.resume()
             };
-            if let Some(m) = island.exchange(ma.best().cloned()) {
-                ma.immigrate(m);
+            let migrant = if set.async_migration {
+                if let Some(b) = ma.best() {
+                    island.post(b.clone());
+                }
+                island.take()
+            } else {
+                island.exchange(ma.best().cloned())
+            };
+            if let Some(m) = migrant {
+                match set.migration {
+                    Migration::Replace => {
+                        ma.immigrate(m);
+                    }
+                    Migration::Cross | Migration::Part => ma.receive(m),
+                }
             }
         }
         st.global_best().cost()
@@ -295,6 +333,13 @@ fn main() {
         runs: args.value("--runs").unwrap_or(4),
         first_seed: args.value("--first-seed").unwrap_or(1),
         migrate_every: args.value("--migrate-every").unwrap_or(0),
+        migration: match args.value::<String>("--migration").as_deref() {
+            None | Some("replace") => Migration::Replace,
+            Some("cross") => Migration::Cross,
+            Some("part") => Migration::Part,
+            Some(x) => panic!("unknown migration {x:?} (replace, cross, part)"),
+        },
+        async_migration: args.flag("--async-migration"),
         jobs: args
             .value("--jobs")
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
@@ -389,6 +434,8 @@ mod tests {
                 runs: 3,
                 first_seed: 1,
                 migrate_every: 0,
+                migration: Migration::Replace,
+                async_migration: false,
                 jobs,
                 k: 5,
                 population: 4,
@@ -412,6 +459,8 @@ mod tests {
             runs: 3,
             first_seed: 1,
             migrate_every: 10,
+            migration: Migration::Replace,
+            async_migration: false,
             jobs: 3,
             stop_at_best: false,
             k: 5,
@@ -431,6 +480,8 @@ mod tests {
             runs: 3,
             first_seed: 1,
             migrate_every: 0,
+            migration: Migration::Replace,
+            async_migration: false,
             jobs: 2,
             k: 5,
             population: 4,

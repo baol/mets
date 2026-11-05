@@ -489,3 +489,31 @@ fn islands_exchange_in_a_ring_deterministically_and_cancel_safely() {
     let b = solve(true); // cancelled mid-way: must not deadlock
     assert_eq!(b.len(), 4);
 }
+
+#[test]
+fn a_received_migrant_is_the_second_parent_of_the_next_child() {
+    use std::sync::{Arc, Mutex};
+    let migrant = Evaluated::new(Sort((0..20).collect())); // cost 0: easy to recognise
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let mut st = State::new(Sort(reversed(20)), 3);
+    let mut memetic = Memetic::new(
+        LocalSearch::first_improvement(SwapNeighborhood),
+        MaxIterations::new(1),
+        perturb_with(|s: &mut Evaluated<Sort>, rng| shuffle(s, rng)),
+        UniformCrossover,
+        3,
+    )
+    .with_migration_crossover(crossover_with(move |_a: &Sort, b: &Sort, _child, _rng| {
+        log.lock().unwrap().push(b.evaluate());
+    }));
+    memetic.runner(&mut st).until(MaxIterations::new(3)).run(); // fill the population
+    memetic.receive(migrant);
+    memetic
+        .runner(&mut st)
+        .until(MaxIterations::new(2))
+        .resume();
+    // the migration crossover ran exactly once, with the migrant as second parent
+    assert_eq!(*seen.lock().unwrap(), vec![0]);
+    assert_eq!(memetic.population().len(), 3);
+}

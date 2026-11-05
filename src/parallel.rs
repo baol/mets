@@ -6,7 +6,8 @@
 //! * [`islands`]: an island model. Each island runs on its own thread and,
 //!   at every [`Island::exchange`], sends a solution to the next island of a
 //!   ring and receives one from the previous. Exchanges are synchronised, so
-//!   results depend only on the seeds.
+//!   results depend only on the seeds. [`Island::post`] / [`Island::take`]
+//!   migrate asynchronously instead (no waiting, timing-dependent results).
 //!
 //! A shared [`Cancel`] token stops every search early, e.g. once a target cost
 //! is reached.
@@ -89,6 +90,20 @@ impl<S: Model> Island<'_, S> {
     /// sent. Every island must call this the same number of times (it waits
     /// for all of them), so run a fixed number of epochs and let a cancelled
     /// search finish its remaining epochs immediately.
+    /// Asynchronous migration: leave `outgoing` in the next island's mailbox
+    /// (replacing an unread one), without waiting. Faster islands don't wait
+    /// for slower ones, but results then depend on thread timing.
+    pub fn post(&self, outgoing: Evaluated<S>) {
+        let n = self.slots.len();
+        *self.slots[(self.index + 1) % n].lock().unwrap() = Some(outgoing);
+    }
+
+    /// Asynchronous migration: take what the previous island last posted, if
+    /// anything. Never waits.
+    pub fn take(&self) -> Option<Evaluated<S>> {
+        self.slots[self.index].lock().unwrap().take()
+    }
+
     pub fn exchange(&self, outgoing: Option<Evaluated<S>>) -> Option<Evaluated<S>> {
         let n = self.slots.len();
         *self.slots[(self.index + 1) % n].lock().unwrap() = outgoing;

@@ -62,6 +62,10 @@ pub struct Memetic<S: Model, I, T, P, X> {
     steps: u64,
     /// First parent of the current child (for `replace_parent`).
     parent: Option<usize>,
+    /// Received solutions (migrants), each the second parent of a coming child.
+    received: Vec<Evaluated<S>>,
+    /// Crossover for children of a member and a migrant (default: `crossover`).
+    migration_crossover: Option<Box<dyn Crossover<S>>>,
     population: Vec<Evaluated<S>>,
     since_insertion: u64,
 }
@@ -86,6 +90,8 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
             elite_previous: None,
             steps: 0,
             parent: None,
+            received: Vec::new(),
+            migration_crossover: None,
             population: Vec::new(),
             since_insertion: 0,
         }
@@ -135,6 +141,22 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
     /// population moved away from.
     pub fn elites(mut self, cycle: u64) -> Self {
         self.elite_cycle = cycle.max(1);
+        self
+    }
+
+    /// Receive a solution from outside (e.g. the best of another island)
+    /// without letting it enter the population: it becomes the second parent
+    /// of the next child, built with the migration crossover from a random
+    /// member, then improved and inserted by the usual rules. With a partial
+    /// crossover (`with_migration_crossover(perm::PathRelinking { fraction: 0.2 })`)
+    /// the island takes only parts of the migrant, as a guided perturbation.
+    pub fn receive(&mut self, migrant: Evaluated<S>) {
+        self.received.push(migrant);
+    }
+
+    /// The crossover used for children of a member and a received migrant.
+    pub fn with_migration_crossover(mut self, crossover: impl Crossover<S> + 'static) -> Self {
+        self.migration_crossover = Some(Box::new(crossover));
         self
     }
 
@@ -261,15 +283,26 @@ where
             let init = &mut self.init;
             st.modify_current(|cur, rng| init.perturb(cur, rng));
         } else {
+            let migrant = self.received.pop();
             let (pop, crossover) = (&self.population, &mut self.crossover);
+            let migration = &mut self.migration_crossover;
             let a = st.modify_current(|cur, rng| {
                 let a = rng.random_range(0..pop.len());
-                let mut b = rng.random_range(0..pop.len() - 1);
-                if b >= a {
-                    b += 1;
-                }
                 cur.clone_from(&pop[a]);
-                cur.modify(|child| crossover.cross(&pop[a], &pop[b], child, rng));
+                match &migrant {
+                    // a child of a member and the migrant
+                    Some(m) => cur.modify(|child| match migration {
+                        Some(x) => x.cross(&pop[a], m, child, rng),
+                        None => crossover.cross(&pop[a], m, child, rng),
+                    }),
+                    None => {
+                        let mut b = rng.random_range(0..pop.len() - 1);
+                        if b >= a {
+                            b += 1;
+                        }
+                        cur.modify(|child| crossover.cross(&pop[a], &pop[b], child, rng));
+                    }
+                }
                 a
             });
             self.parent = Some(a);
@@ -321,5 +354,6 @@ where
         self.steps = 0;
         self.elite_current = None;
         self.elite_previous = None;
+        self.received.clear();
     }
 }
