@@ -26,6 +26,13 @@
 //!   --cpu            improve on the CPU threads instead of the GPU
 //!   --trace FILE     append one line per batch: time, cost spread, and a CPU
 //!                    recount of a few returned permutations (mismatches = kernel bug)
+//!   --kopt K         at the end, polish the best permutation by exhaustive k-opt:
+//!                    the best of all K! rearrangements of each of many groups of
+//!                    K positions, applied while one improves (default 0: off; K <= 12)
+//!   --kopt-groups G  groups per round (default 1024 on the GPU, 64 with --cpu)
+//!   --kopt-rounds R  stop after R rounds without improvement (default 20)
+//!   --polish-from FILE.best  skip the search: k-opt polish this permutation
+//!                    (default K = 9), save the result as NAME.kopt.best
 //! The best permutation found is saved as NAME.best (cost, then the 1-based
 //! facility of each location).
 //!
@@ -90,7 +97,7 @@ impl Improver for CpuRots<'_> {
 
 #[cfg(feature = "gpu")]
 mod gpu {
-    use super::{Improver, Instance, C};
+    use super::{unrank, Improver, Instance, KOpt, C};
     use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
     use std::sync::Arc;
 
@@ -274,6 +281,180 @@ extern "C" __global__ void rots(
 }
 "#;
 
+    /// Exhaustive k-opt, one block per group of k positions: the threads
+    /// compute the group's row terms (see `GroupTerms`), then share the k!
+    /// rearrangement ranks; improving ones are packed as (delta + 2^34) above
+    /// a 29-bit rank, so the block minimum is the best improvement.
+    const KOPT_KERNEL: &str = r#"
+typedef long long ll;
+typedef unsigned long long u64;
+extern "C" __global__ void kopt(
+    const ll* __restrict__ a, const ll* __restrict__ b, int n, int k,
+    const int* __restrict__ p, const int* __restrict__ groups, u64* out, long long total)
+{
+    const int g = blockIdx.x, t = threadIdx.x, T = blockDim.x;
+    __shared__ int S[12], e[12];
+    __shared__ ll R[144], A[144], B[144];
+    __shared__ u64 sel;
+    __shared__ ll base;
+    if (t < k) { S[t] = groups[g * k + t]; e[t] = p[S[t]]; }
+    if (t == 0) sel = ~0ull;
+    __syncthreads();
+    for (int q = t; q < k * k; q += T) {
+        const int tt = q / k, x = q % k;
+        ll sum = 0;
+        for (int j = 0; j < n; j++) {
+            bool inside = false;
+            for (int m = 0; m < k; m++) inside |= (S[m] == j);
+            if (inside) continue;
+            sum += a[S[tt] * n + j] * b[e[x] * n + p[j]] + a[j * n + S[tt]] * b[p[j] * n + e[x]];
+        }
+        R[q] = sum;
+        A[q] = a[S[tt] * n + S[x]];
+        B[q] = b[e[tt] * n + e[x]];
+    }
+    __syncthreads();
+    if (t == 0) {
+        ll v = 0;
+        for (int i = 0; i < k; i++) {
+            v += R[i * k + i];
+            for (int u = 0; u < k; u++) v += A[i * k + u] * B[i * k + u];
+        }
+        base = v;
+    }
+    __syncthreads();
+    ll fact[13];
+    fact[0] = 1;
+    for (int i = 1; i <= 12; i++) fact[i] = fact[i - 1] * i;
+    u64 local = ~0ull;
+    for (ll r = t; r < total; r += T) {
+        int q[12];
+        unsigned used = 0;
+        ll rr = r;
+        for (int i = 0; i < k; i++) {
+            const ll f = fact[k - 1 - i];
+            int d = (int)(rr / f);
+            rr %= f;
+            int c = 0;
+            for (int m = 0; m < k; m++) {
+                if (!((used >> m) & 1u)) {
+                    if (d == 0) { c = m; break; }
+                    d--;
+                }
+            }
+            q[i] = c;
+            used |= 1u << c;
+        }
+        ll v = 0;
+        for (int i = 0; i < k; i++) {
+            v += R[i * k + q[i]];
+            for (int u = 0; u < k; u++) v += A[i * k + u] * B[q[i] * k + q[u]];
+        }
+        const ll delta = v - base;
+        if (delta < 0) {
+            const u64 key = ((u64)(delta + (1LL << 34)) << 29) | (u64)r;
+            if (key < local) local = key;
+        }
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        const u64 x = __shfl_down_sync(0xffffffffu, local, o);
+        if (x < local) local = x;
+    }
+    if ((t & 31) == 0) atomicMin(&sel, local);
+    __syncthreads();
+    if (t == 0) out[g] = sel;
+}
+"#;
+
+    pub struct GpuKOpt {
+        stream: Arc<CudaStream>,
+        f: CudaFunction,
+        a: CudaSlice<i64>,
+        b: CudaSlice<i64>,
+        n: usize,
+        threads: u32,
+    }
+
+    impl GpuKOpt {
+        pub fn new(inst: &Instance, threads: u32) -> Result<Self, Error> {
+            assert!(threads.is_multiple_of(32), "whole warps");
+            // non-negative matrices: a rearrangement lowers the cost by at most
+            // the cost itself, checked against 2^34 in `run`
+            assert!(
+                inst.a.iter().chain(&inst.b).all(|&x| x >= 0),
+                "k-opt on the GPU needs non-negative matrices"
+            );
+            let ctx = cudarc::driver::CudaContext::new(0)?;
+            let stream = ctx.default_stream();
+            let ptx = cudarc::nvrtc::compile_ptx(KOPT_KERNEL)?;
+            let f = ctx.load_module(ptx)?.load_function("kopt")?;
+            Ok(GpuKOpt {
+                a: stream.clone_htod(&inst.a)?,
+                b: stream.clone_htod(&inst.b)?,
+                stream,
+                f,
+                n: inst.n,
+                threads,
+            })
+        }
+
+        fn run(
+            &mut self,
+            inst: &Instance,
+            p: &[usize],
+            groups: &[Vec<usize>],
+        ) -> Result<Vec<(C, Vec<usize>)>, Error> {
+            assert!(inst.cost_of(p) < 1 << 34, "k-opt deltas must fit 35 bits");
+            let k = groups[0].len();
+            assert!((2..=12).contains(&k), "2 <= k <= 12");
+            let p32: Vec<i32> = p.iter().map(|&x| x as i32).collect();
+            let g32: Vec<i32> = groups.iter().flatten().map(|&x| x as i32).collect();
+            let (dp, dg) = (self.stream.clone_htod(&p32)?, self.stream.clone_htod(&g32)?);
+            let mut out = self.stream.alloc_zeros::<u64>(groups.len())?;
+            let total: i64 = (1..=k as i64).product();
+            let (n32, k32) = (self.n as i32, k as i32);
+            let mut launch = self.stream.launch_builder(&self.f);
+            launch
+                .arg(&self.a)
+                .arg(&self.b)
+                .arg(&n32)
+                .arg(&k32)
+                .arg(&dp)
+                .arg(&dg)
+                .arg(&mut out)
+                .arg(&total);
+            let cfg = LaunchConfig {
+                grid_dim: (groups.len() as u32, 1, 1),
+                block_dim: (self.threads, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe { launch.launch(cfg) }?;
+            let keys = self.stream.clone_dtoh(&out)?;
+            Ok(keys
+                .into_iter()
+                .map(|key| {
+                    if key == u64::MAX {
+                        (0, (0..k).collect())
+                    } else {
+                        let delta = (key >> 29) as i64 - (1i64 << 34);
+                        (delta, unrank(key & ((1 << 29) - 1), k))
+                    }
+                })
+                .collect())
+        }
+    }
+
+    impl KOpt for GpuKOpt {
+        fn best(
+            &mut self,
+            inst: &Instance,
+            p: &[usize],
+            groups: &[Vec<usize>],
+        ) -> Vec<(C, Vec<usize>)> {
+            self.run(inst, p, groups).expect("GPU k-opt")
+        }
+    }
+
     pub struct GpuRots {
         stream: Arc<CudaStream>,
         f: CudaFunction,
@@ -423,6 +604,237 @@ extern "C" __global__ void rots(
     }
 }
 
+// ------------------------------------------------------------------ k-opt
+
+/// For a group `s` of positions of `p` (elements `e[x] = p[s[x]]`), the change
+/// of cost of putting `e[q[t]]` at `s[t]` splits into row terms and pairs
+/// inside the group:
+///   Δ(q) = Σ_t (R[t][q_t] − R[t][t]) + Σ_{t,u} A[t][u]·(B[q_t][q_u] − B[t][u])
+/// with R[t][x] = Σ_{j ∉ s} a[s_t][j]·b[e_x][p_j] + a[j][s_t]·b[p_j][e_x],
+/// A[t][u] = a[s_t][s_u] and B[x][y] = b[e_x][e_y].
+struct GroupTerms {
+    k: usize,
+    r: Vec<C>,
+    a: Vec<C>,
+    b: Vec<C>,
+    base: C,
+}
+
+impl GroupTerms {
+    fn new(inst: &Instance, p: &[usize], s: &[usize]) -> Self {
+        let (n, k) = (inst.n, s.len());
+        let e: Vec<usize> = s.iter().map(|&i| p[i]).collect();
+        let mut inside = vec![false; n];
+        s.iter().for_each(|&i| inside[i] = true);
+        let (a, b) = (&inst.a, &inst.b);
+        let mut r = vec![0; k * k];
+        for t in 0..k {
+            for x in 0..k {
+                r[t * k + x] = (0..n)
+                    .filter(|&j| !inside[j])
+                    .map(|j| {
+                        a[s[t] * n + j] * b[e[x] * n + p[j]] + a[j * n + s[t]] * b[p[j] * n + e[x]]
+                    })
+                    .sum();
+            }
+        }
+        let am: Vec<C> = (0..k * k).map(|q| a[s[q / k] * n + s[q % k]]).collect();
+        let bm: Vec<C> = (0..k * k).map(|q| b[e[q / k] * n + e[q % k]]).collect();
+        let mut terms = GroupTerms {
+            k,
+            r,
+            a: am,
+            b: bm,
+            base: 0,
+        };
+        let identity: Vec<usize> = (0..k).collect();
+        terms.base = terms.raw(&identity);
+        terms
+    }
+
+    /// Σ_t R[t][q_t] + Σ_{t,u} A[t][u]·B[q_t][q_u]
+    fn raw(&self, q: &[usize]) -> C {
+        let k = self.k;
+        let mut v = 0;
+        for t in 0..k {
+            v += self.r[t * k + q[t]];
+            for u in 0..k {
+                v += self.a[t * k + u] * self.b[q[t] * k + q[u]];
+            }
+        }
+        v
+    }
+
+    fn delta(&self, q: &[usize]) -> C {
+        self.raw(q) - self.base
+    }
+}
+
+/// The rearrangement of rank `r` (factorial number system, 0 = identity).
+#[cfg_attr(not(any(feature = "gpu", test)), allow(dead_code))]
+fn unrank(mut r: u64, k: usize) -> Vec<usize> {
+    let mut fact = vec![1u64; k + 1];
+    for i in 1..=k {
+        fact[i] = fact[i - 1] * i as u64;
+    }
+    let mut free: Vec<usize> = (0..k).collect();
+    let mut q = Vec::with_capacity(k);
+    for i in 0..k {
+        let f = fact[k - 1 - i];
+        let digit = (r / f) as usize;
+        r %= f;
+        q.push(free.remove(digit));
+    }
+    q
+}
+
+/// The best rearrangement of each group: (delta, q) with `q[t]` the index in
+/// the group of the element to put at its t-th position.
+trait KOpt {
+    fn best(&mut self, inst: &Instance, p: &[usize], groups: &[Vec<usize>])
+        -> Vec<(C, Vec<usize>)>;
+}
+
+/// All k! rearrangements by Heap's algorithm, on the CPU threads.
+struct CpuKOpt {
+    jobs: usize,
+}
+
+impl KOpt for CpuKOpt {
+    fn best(
+        &mut self,
+        inst: &Instance,
+        p: &[usize],
+        groups: &[Vec<usize>],
+    ) -> Vec<(C, Vec<usize>)> {
+        let chunk = groups.len().div_ceil(self.jobs.max(1)).max(1);
+        let mut out = vec![(0, Vec::new()); groups.len()];
+        std::thread::scope(|scope| {
+            for (gs, os) in groups.chunks(chunk).zip(out.chunks_mut(chunk)) {
+                scope.spawn(move || {
+                    for (g, o) in gs.iter().zip(os) {
+                        let terms = GroupTerms::new(inst, p, g);
+                        let k = g.len();
+                        let mut q: Vec<usize> = (0..k).collect();
+                        let mut best = (0, q.clone());
+                        let mut c = vec![0usize; k];
+                        let mut i = 1;
+                        while i < k {
+                            if c[i] < i {
+                                if i % 2 == 0 {
+                                    q.swap(0, i)
+                                } else {
+                                    q.swap(c[i], i)
+                                }
+                                let d = terms.delta(&q);
+                                if d < best.0 {
+                                    best = (d, q.clone());
+                                }
+                                c[i] += 1;
+                                i = 1;
+                            } else {
+                                c[i] = 0;
+                                i += 1;
+                            }
+                        }
+                        *o = best;
+                    }
+                });
+            }
+        });
+        out
+    }
+}
+
+/// k random distinct positions, or, with a distance, a pivot and its k − 1
+/// closest positions.
+fn groups(
+    n: usize,
+    k: usize,
+    count: usize,
+    close: Option<&[C]>,
+    rng: &mut DefaultRng,
+) -> Vec<Vec<usize>> {
+    (0..count)
+        .map(|_| match close {
+            Some(d) => {
+                let pivot = rng.random_range(0..n);
+                let mut by: Vec<usize> = (0..n).collect();
+                // random tie-breaks, so equal distances give different groups
+                let key: Vec<u32> = (0..n).map(|_| rng.random()).collect();
+                by.sort_by_key(|&j| (j != pivot, d[pivot * n + j], key[j]));
+                by.truncate(k);
+                by
+            }
+            None => {
+                let mut all: Vec<usize> = (0..n).collect();
+                for i in 0..k {
+                    let j = rng.random_range(i..n);
+                    all.swap(i, j);
+                }
+                all.truncate(k);
+                all
+            }
+        })
+        .collect()
+}
+
+/// Exhaustive k-opt polish: each round, the best rearrangement over `count`
+/// groups of k positions is applied if it improves; stops after `patience`
+/// rounds without improvement. Returns the polished permutation and cost.
+#[allow(clippy::too_many_arguments)]
+fn kopt_polish(
+    inst: &Instance,
+    mut p: Vec<usize>,
+    kopt: &mut dyn KOpt,
+    k: usize,
+    count: usize,
+    patience: usize,
+    rng: &mut DefaultRng,
+    trace: &mut Trace,
+) -> (C, Vec<usize>) {
+    let n = inst.n;
+    let close = inst
+        .distance()
+        .filter(|(over_elements, _)| !over_elements)
+        .map(|(_, d)| d);
+    let mut cost = inst.cost_of(&p);
+    let (mut idle, mut round) = (0, 0);
+    let t0 = Instant::now();
+    while idle < patience {
+        round += 1;
+        let gs = groups(n, k.min(n), count, close, rng);
+        let t = Instant::now();
+        let results = kopt.best(inst, &p, &gs);
+        let (g, (d, q)) = gs
+            .iter()
+            .zip(results)
+            .min_by_key(|(_, (d, _))| *d)
+            .expect("groups");
+        if d < 0 {
+            let e: Vec<usize> = g.iter().map(|&i| p[i]).collect();
+            for (t, &i) in g.iter().enumerate() {
+                p[i] = e[q[t]];
+            }
+            assert!(is_permutation(&p, n), "a rearrangement keeps a permutation");
+            let recount = inst.cost_of(&p);
+            assert_eq!(recount, cost + d, "k-opt delta matches the recount");
+            (cost, idle) = (recount, 0);
+            println!(
+                "  k-opt round {round}: {cost} ({d}), {:.1} s",
+                t0.elapsed().as_secs_f64()
+            );
+        } else {
+            idle += 1;
+        }
+        trace.line(format_args!(
+            "kopt round={round} k={k} groups={count} best_delta={d} cost={cost} round_s={:.3}",
+            t.elapsed().as_secs_f64()
+        ));
+    }
+    (cost, p)
+}
+
 /// Minimal traces for debugging runs on another machine (`--trace FILE`).
 struct Trace(Option<std::fs::File>);
 
@@ -491,6 +903,14 @@ fn main() {
     let crossover: String = args
         .value("--crossover")
         .unwrap_or_else(|| "uniform".into());
+    let polish_from: Option<String> = args.value("--polish-from");
+    let kopt_k: usize = args
+        .value("--kopt")
+        .unwrap_or(if polish_from.is_some() { 9 } else { 0 });
+    let kopt_groups: usize = args
+        .value("--kopt-groups")
+        .unwrap_or(if cpu { 64 } else { 1024 });
+    let kopt_rounds: usize = args.value("--kopt-rounds").unwrap_or(20);
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(3600.0);
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let threads: u32 = args.value("--threads").unwrap_or(256);
@@ -514,6 +934,47 @@ fn main() {
     let n = inst.n;
     let iters = iters_n * n as u64;
 
+    let name = Path::new(&file)
+        .file_stem()
+        .map_or("qap".into(), |s| s.to_string_lossy().into_owned());
+    let mut kopt: Box<dyn KOpt> = if cpu || kopt_k == 0 {
+        Box::new(CpuKOpt { jobs })
+    } else {
+        gpu_kopt(&inst, threads)
+    };
+    if let Some(from) = &polish_from {
+        // k-opt polish of a saved permutation (NAME.best: cost, then 1-based facilities)
+        let text = std::fs::read_to_string(from).unwrap_or_else(|e| panic!("{from}: {e}"));
+        let p: Vec<usize> = text
+            .lines()
+            .nth(1)
+            .expect("second line: the permutation")
+            .split_whitespace()
+            .map(|x| x.parse::<usize>().expect("a number") - 1)
+            .collect();
+        assert!(
+            is_permutation(&p, n),
+            "{from}: not a permutation of 1..={n}"
+        );
+        println!(
+            "{from}: cost {}; k-opt polish, k = {kopt_k}, {kopt_groups} groups per round, until {kopt_rounds} rounds without improvement; build {}",
+            inst.cost_of(&p),
+            env!("METS_GIT_HASH")
+        );
+        let mut rng = DefaultRng::seed_from_u64(seed);
+        let (cost, p) = kopt_polish(
+            &inst,
+            p,
+            &mut *kopt,
+            kopt_k,
+            kopt_groups,
+            kopt_rounds,
+            &mut rng,
+            &mut trace,
+        );
+        save(&format!("{name}.kopt.best"), cost, &p, best_known);
+        return;
+    }
     let setup = Instant::now();
     let mut improver: Box<dyn Improver> = if cpu {
         Box::new(CpuRots { inst: &inst, jobs })
@@ -622,6 +1083,19 @@ fn main() {
             }
         }
     }
+    if kopt_k > 0 {
+        println!("{file}: k-opt polish of the best, k = {kopt_k}");
+        best = kopt_polish(
+            &inst,
+            best.1,
+            &mut *kopt,
+            kopt_k,
+            kopt_groups,
+            kopt_rounds,
+            &mut rng,
+            &mut trace,
+        );
+    }
     trace.line(format_args!(
         "end best={} total_s={:.1}",
         best.0,
@@ -631,21 +1105,19 @@ fn main() {
         is_permutation(&best.1, n) && inst.cost_of(&best.1) == best.0,
         "verified"
     );
-    let name = Path::new(&file)
-        .file_stem()
-        .map_or("qap".into(), |s| s.to_string_lossy());
-    let out = format!("{name}.best");
-    let perm: Vec<String> = best.1.iter().map(|&x| (x + 1).to_string()).collect();
-    std::fs::write(&out, format!("{}\n{}\n", best.0, perm.join(" ")))
+    print!("{file}: in {:.1} s, ", t0.elapsed().as_secs_f64());
+    save(&format!("{name}.best"), best.0, &best.1, best_known);
+}
+
+/// Save a permutation as `cost`, then the 1-based facilities, and report it.
+fn save(out: &str, cost: C, p: &[usize], best_known: Option<C>) {
+    let perm: Vec<String> = p.iter().map(|&x| (x + 1).to_string()).collect();
+    std::fs::write(out, format!("{cost}\n{}\n", perm.join(" ")))
         .unwrap_or_else(|e| panic!("{out}: {e}"));
     let g = best_known.map_or(String::new(), |b| {
-        format!(", best known {b} (gap {:.3}%)", gap(best.0, b))
+        format!(", best known {b} (gap {:.3}%)", gap(cost, b))
     });
-    println!(
-        "{file}: best {}{g} in {:.1} s, saved to {out}",
-        best.0,
-        t0.elapsed().as_secs_f64()
-    );
+    println!("best {cost}{g}, saved to {out}");
 }
 
 #[cfg(feature = "gpu")]
@@ -653,7 +1125,107 @@ fn gpu_improver<'a>(inst: &'a Instance, p: usize, threads: u32) -> Box<dyn Impro
     Box::new(gpu::GpuRots::new(inst, p, threads).unwrap_or_else(|e| panic!("GPU: {e}")))
 }
 
+#[cfg(feature = "gpu")]
+fn gpu_kopt(inst: &Instance, threads: u32) -> Box<dyn KOpt> {
+    Box::new(gpu::GpuKOpt::new(inst, threads).unwrap_or_else(|e| panic!("GPU: {e}")))
+}
+
+#[cfg(not(feature = "gpu"))]
+fn gpu_kopt(_: &Instance, _: u32) -> Box<dyn KOpt> {
+    panic!("built without the GPU: rebuild with --features gpu, or run with --cpu")
+}
+
 #[cfg(not(feature = "gpu"))]
 fn gpu_improver<'a>(_: &'a Instance, _: usize, _: u32) -> Box<dyn Improver + 'a> {
     panic!("built without the GPU: rebuild with --features gpu, or run with --cpu")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A random asymmetric instance with a non-zero diagonal.
+    fn asymmetric(n: usize, seed: u64) -> Instance {
+        let mut rng = DefaultRng::seed_from_u64(seed);
+        let mut m = || {
+            (0..n * n)
+                .map(|_| rng.random_range(0..20))
+                .collect::<Vec<C>>()
+        };
+        let (a, b) = (m(), m());
+        Instance::new(n, a, b)
+    }
+
+    fn all_rearrangements(k: usize) -> Vec<Vec<usize>> {
+        (0..(1..=k as u64).product::<u64>())
+            .map(|r| unrank(r, k))
+            .collect()
+    }
+
+    #[test]
+    fn group_deltas_match_recounts() {
+        for inst in [Instance::random(12, 5), asymmetric(12, 6)] {
+            let mut rng = DefaultRng::seed_from_u64(7);
+            let p = random_start(12, 8);
+            for g in groups(12, 5, 10, None, &mut rng) {
+                let terms = GroupTerms::new(&inst, &p, &g);
+                for q in all_rearrangements(5).into_iter().step_by(7) {
+                    let mut after = p.clone();
+                    for (t, &i) in g.iter().enumerate() {
+                        after[i] = p[g[q[t]]];
+                    }
+                    assert_eq!(terms.delta(&q), inst.cost_of(&after) - inst.cost_of(&p));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unrank_is_a_bijection() {
+        let all = all_rearrangements(5);
+        assert_eq!(all[0], vec![0, 1, 2, 3, 4]);
+        let mut sorted = all.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 120);
+        assert!(all.iter().all(|q| is_permutation(q, 5)));
+    }
+
+    #[test]
+    fn cpu_kopt_finds_the_best_rearrangement() {
+        let inst = asymmetric(10, 9);
+        let mut rng = DefaultRng::seed_from_u64(10);
+        let p = random_start(10, 11);
+        let gs = groups(10, 5, 6, None, &mut rng);
+        let found = CpuKOpt { jobs: 2 }.best(&inst, &p, &gs);
+        for (g, (d, q)) in gs.iter().zip(found) {
+            let terms = GroupTerms::new(&inst, &p, g);
+            let brute = all_rearrangements(5)
+                .iter()
+                .map(|q| terms.delta(q))
+                .min()
+                .unwrap();
+            assert_eq!(d, brute.min(0), "best (or no) improvement");
+            assert_eq!(terms.delta(&q), d);
+        }
+    }
+
+    #[test]
+    fn kopt_polish_improves_and_stays_exact() {
+        let inst = Instance::random(14, 12);
+        let p = random_start(14, 13);
+        let start = inst.cost_of(&p);
+        let mut rng = DefaultRng::seed_from_u64(14);
+        let (cost, q) = kopt_polish(
+            &inst,
+            p,
+            &mut CpuKOpt { jobs: 2 },
+            4,
+            16,
+            3,
+            &mut rng,
+            &mut Trace(None),
+        );
+        assert!(is_permutation(&q, 14) && inst.cost_of(&q) == cost && cost < start);
+    }
 }

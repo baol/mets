@@ -375,7 +375,17 @@ argument (from `inst.symmetric`).
 
 **Measure.** `improve_s` on sko100a before/after; expect ~1.6–2×.
 
-## Q4. QAP GPU: exhaustive k-opt polish (optional)
+## Q4. QAP GPU: exhaustive k-opt polish (optional) (implemented)
+
+Implemented in `qap_gpu`: `--kopt K` polishes the best at the end,
+`--polish-from FILE.best` polishes a saved permutation (default K = 9,
+result in NAME.kopt.best). Groups are a pivot and its K − 1 closest
+positions when the instance has a distance between positions, else random.
+Each applied rearrangement is checked against a full recount. The CPU
+reference (Heap's algorithm) and the delta formula are unit-tested against
+brute force; the GPU kernel (`kopt`, ranks decoded in the factorial number
+system) is compile-only here.
+
 
 **Why.** The GPU is best at breadth without dependency chains. For a
 near-record permutation, enumerate all `k!` rearrangements of `k` random
