@@ -1041,8 +1041,25 @@ independent runs on 4 threads, best of them; times are wall-clock.
 
   Frequent migration hurts: the best member spreads to every island and the
   synchronised exchange makes fast islands wait for slow ones. Rare migration
-  is on par with independent runs within this noise. Migration stays off by
-  default.
+  is on par with independent runs within this noise.
+* Migrants as partners instead of replacements (`--migration cross|part`,
+  `Memetic::receive`): the migrant is the second parent of the next child.
+  With `part` the child takes only 20% of the migrant's differing assignments
+  (path relinking), a guided perturbation. Same 5 trials:
+
+  | configuration | sko100a: reached, avg (median, max) | tai100b: avg (median) |
+  |---|---|---|
+  | independent runs | 5/5, 43 s (45, 98) | 9.4 s (8.5) |
+  | cross, every 50 | 5/5, 96 s (61, 219) | 10.5 s (12.1) |
+  | cross, every 50, async | 4/5, 52 s (74, 94) | 10.3 s (9.1) |
+  | part, every 50 | 5/5, 26 s (24, 41) | 9.6 s (8.9) |
+  | part, every 50, async | 5/5, 60 s (63, 76) | 8.2 s (8.1) |
+  | part, every 500 | 5/5, 18 s (17, 34) | 23.5 s (17.9) |
+
+  Taking only part of another island's best is about 2× faster and much more
+  consistent on `sko100a`; copying a migrant whole (replace, cross) hurts.
+  `tai100b` is solved fast by everything and doesn't separate the variants.
+  Five trials are few: a confirmation on more seeds and instances is pending.
 * Time to the best-known value, one core per run, 5 seeds, memetic search
   stopping at the target (`--runs 1 --jobs 1 --first-seed s`), against
   Merz & Freisleben's memetic algorithm (CEC 1999, Table 2: one core of a
