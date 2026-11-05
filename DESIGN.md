@@ -1166,7 +1166,31 @@ one-hour runs. On the queen graphs, `queen15_15` reaches 16 and
 (15 and 16, settled by SAT up to n = 26).
 
 No record has been beaten. The best-known values come from much longer runs
-(hours to weeks per instance) of methods of the same family.
+(hours to weeks per instance) of methods of the same family. A third
+one-hour `--head` run at k = 47, after the TabuCol speed-up below, did not
+find 47 either.
+
+**TabuCol speed.** The model keeps the list of conflicting vertices and
+each vertex's smallest γ (a lower bound on its recolouring deltas), and
+`Visitor::can_skip` lets the tabu search prune with random ties: 210,000 →
+337,000 iterations/s on DSJC500.5 at k = 48 (`coloring --bench`, one core).
+
+**GPU (`examples/coloring_gpu.rs`, `--features gpu`).** HEAD runs as many
+independent pairs; each generation's children are improved in one batch by
+a CUDA kernel (one block per individual, compiled at start-up by NVRTC
+through `cudarc`) or, with `--cpu`, by the library's `TabuSearch` on the
+CPU threads. `--trace` logs each batch with a CPU recount of returned
+colourings, and the build's git commit. On an RTX 3060 (28 SMs), DSJC500.5,
+k = 48, a batch of 128 runs × 5,000 iterations:
+
+| kernel | per batch | TabuCol it/s |
+|---|---|---|
+| tables in global memory | 0.55 s | 1.2 M |
+| 16-bit conflict table and colouring in shared memory (2 blocks per SM) | 0.155 s | 4.1 M |
+| + conflicting vertices listed, their moves shared by all threads | 0.06 s | 10–11 M |
+
+10 M iterations/s is about 30 of the 4-core sandbox's cores; a legal
+48-colouring took 12.9 s. Every recount matched across all test runs.
 
 The C++ benchmark source is not committed. It is a 40-line program that
 includes `metslib/mets.hh`, and can be added to METSlib's `test/` if useful.
