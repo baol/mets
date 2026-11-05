@@ -17,3 +17,9 @@ codegen-units = 1
 num-traits = "0.2"
 rand = { version = "0.9", default-features = false, features = ["std"] }
 rand_xoshiro = "0.7"
+# Only for `examples/coloring_gpu.rs` (`--features gpu`): the CUDA driver and
+# NVRTC are loaded at run time, so building needs no CUDA toolkit.
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["std", "cuda-12000", "dynamic-loading", "driver", "nvrtc"] }
+
+[features]
+gpu = ["dep:cudarc"]
