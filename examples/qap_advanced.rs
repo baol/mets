@@ -34,6 +34,8 @@
 //!   --k K          lns: positions rearranged per step (default 5)
 //!   --runs R       independent runs (default 4)
 //!   --first-seed S seed of the first run; runs use S, S+1, … (default 1)
+//!   --migrate-every G  ma: the runs become islands in a ring, the best member
+//!                  migrating every G children (one thread per island; default 0: independent)
 //!   --jobs J       threads (default: all cores)
 //!   --run-to-end   do not stop at the best-known value
 //!   --markdown     --qaplib only: print a Markdown table
@@ -42,7 +44,7 @@
 mod common;
 
 use common::*;
-use mets::parallel::{run_many, Cancel};
+use mets::parallel::{self, run_many, Cancel};
 use mets::perm::{
     adaptive_perturbation, shuffle, BestRearrangement, RobustTabuSearch, UniformCrossover,
 };
@@ -65,6 +67,8 @@ struct Settings {
     runs: u64,
     /// Seed of the first run (runs use first_seed, first_seed + 1, …).
     first_seed: u64,
+    /// ma: run the runs as islands, migrating every this many children (0: independent).
+    migrate_every: u64,
     jobs: usize,
     stop_at_best: bool,
     /// lns: positions rearranged per step.
@@ -196,9 +200,63 @@ fn stop_at(cost: C, target: Option<C>, cancel: &Cancel) {
 }
 
 /// `set.runs` runs on `set.jobs` threads; the best of them.
+/// `ma` as an island model: `set.runs` islands in a ring, the best member
+/// migrating every `set.migrate_every` children.
+fn ma_islands(inst: &Instance, target: Option<C>, set: &Settings) -> Vec<C> {
+    let n = inst.n;
+    parallel::islands(set.runs as usize, |island| {
+        let seed = set.first_seed + island.index() as u64;
+        let mut st = State::new(
+            QapPlain {
+                inst,
+                p: random_start(n, seed),
+            },
+            seed,
+        );
+        let fresh = perturb_with(|s: &mut Evaluated<QapPlain>, rng| shuffle(s, rng));
+        let mut ma = Memetic::new(
+            perm::SwapDescent::new(),
+            island.cancel,
+            fresh,
+            set.crossover,
+            set.population,
+        )
+        .with_distance(|a: &QapPlain, b: &QapPlain| perm::hamming(a, b), n / 10)
+        .renew_after(30);
+        let epochs = set.steps.div_ceil(set.migrate_every);
+        for epoch in 0..epochs {
+            let r = ma
+                .runner(&mut st)
+                .until(MaxIterations::new(set.migrate_every).or(island.cancel))
+                .on_global_improvement(|st| {
+                    stop_at(st.global_best().cost(), target, island.cancel)
+                });
+            if epoch == 0 {
+                r.run()
+            } else {
+                r.resume()
+            };
+            if let Some(m) = island.exchange(ma.best().cloned()) {
+                ma.immigrate(m);
+            }
+        }
+        st.global_best().cost()
+    })
+}
+
 fn solve(inst: &Instance, best_known: Option<C>, set: &Settings) -> Solved {
     let target = best_known.filter(|_| set.stop_at_best);
     let t0 = Instant::now();
+    if set.method == Method::Ma && set.migrate_every > 0 {
+        let found = ma_islands(inst, target, set)
+            .into_iter()
+            .min()
+            .expect("at least one island");
+        return Solved {
+            found,
+            to_found: Some(t0.elapsed().as_secs_f64()),
+        };
+    }
     let results = run_many(set.runs, set.jobs, |r, cancel| {
         (
             run(inst, set.first_seed + r, target, cancel, set),
@@ -236,6 +294,7 @@ fn main() {
         }),
         runs: args.value("--runs").unwrap_or(4),
         first_seed: args.value("--first-seed").unwrap_or(1),
+        migrate_every: args.value("--migrate-every").unwrap_or(0),
         jobs: args
             .value("--jobs")
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
@@ -329,6 +388,7 @@ mod tests {
                 steps: 6,
                 runs: 3,
                 first_seed: 1,
+                migrate_every: 0,
                 jobs,
                 k: 5,
                 population: 4,
@@ -344,6 +404,25 @@ mod tests {
     }
 
     #[test]
+    fn ma_islands_are_deterministic() {
+        let inst = Instance::random(14, 3);
+        let set = Settings {
+            method: Method::Ma,
+            steps: 40,
+            runs: 3,
+            first_seed: 1,
+            migrate_every: 10,
+            jobs: 3,
+            stop_at_best: false,
+            k: 5,
+            population: 6,
+            crossover: Recombine::Uniform,
+            replace_parent: false,
+        };
+        assert_eq!(ma_islands(&inst, None, &set), ma_islands(&inst, None, &set));
+    }
+
+    #[test]
     fn stops_at_the_target() {
         let inst = Instance::random(12, 7);
         let set = Settings {
@@ -351,6 +430,7 @@ mod tests {
             steps: 6,
             runs: 3,
             first_seed: 1,
+            migrate_every: 0,
             jobs: 2,
             k: 5,
             population: 4,

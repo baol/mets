@@ -138,6 +138,40 @@ impl<S: Model, I, T, P, X> Memetic<S, I, T, P, X> {
         self
     }
 
+    /// The best member, if any.
+    pub fn best(&self) -> Option<&Evaluated<S>> {
+        self.population
+            .iter()
+            .min_by(|a, b| a.cost().partial_cmp(&b.cost()).unwrap())
+    }
+
+    /// Add a solution from outside (e.g. a migrant from another island): it
+    /// fills the population, or replaces the worst member if it is better
+    /// and its cost is not present yet. Returns true if it entered.
+    pub fn immigrate(&mut self, s: Evaluated<S>) -> bool {
+        if self.population.iter().any(|m| m.cost() == s.cost()) {
+            return false;
+        }
+        if self.population.len() < self.size {
+            self.population.push(s);
+            return true;
+        }
+        let worst = (0..self.population.len())
+            .max_by(|&a, &b| {
+                self.population[a]
+                    .cost()
+                    .partial_cmp(&self.population[b].cost())
+                    .unwrap()
+            })
+            .expect("non-empty population");
+        if s.cost() < self.population[worst].cost() {
+            self.population[worst] = s;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn population(&self) -> &[Evaluated<S>] {
         &self.population
     }

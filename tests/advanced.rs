@@ -447,3 +447,45 @@ fn swap_descent_reaches_a_local_optimum_of_the_swap_neighborhood() {
         assert_eq!(st.current().cost(), st.current().evaluate());
     }
 }
+
+#[test]
+fn islands_exchange_in_a_ring_deterministically_and_cancel_safely() {
+    let solve = |stop_early: bool| {
+        mets::parallel::islands(4, |island| {
+            let i = island.index();
+            let mut st = State::new(Sort(reversed(30)), i as u64 + 1);
+            let mut memetic = Memetic::new(
+                LocalSearch::first_improvement(SwapNeighborhood),
+                MaxIterations::new(3),
+                perturb_with(|s: &mut Evaluated<Sort>, rng| shuffle(s, rng)),
+                UniformCrossover,
+                4,
+            );
+            let mut received = Vec::new();
+            for epoch in 0..5 {
+                if stop_early && i == 2 && epoch == 1 {
+                    island.cancel.cancel();
+                }
+                let r = memetic
+                    .runner(&mut st)
+                    .until(MaxIterations::new(6).or(island.cancel));
+                if epoch == 0 {
+                    r.run()
+                } else {
+                    r.resume()
+                };
+                if let Some(m) = island.exchange(memetic.best().cloned()) {
+                    received.push(m.cost());
+                    memetic.immigrate(m);
+                }
+            }
+            (st.global_best().cost(), received)
+        })
+    };
+    let a = solve(false);
+    assert_eq!(a, solve(false), "deterministic");
+    assert!(a.iter().all(|(_, r)| r.len() == 5), "a migrant every epoch");
+    // island i receives island i-1's best of the first epoch
+    let b = solve(true); // cancelled mid-way: must not deadlock
+    assert_eq!(b.len(), 4);
+}
