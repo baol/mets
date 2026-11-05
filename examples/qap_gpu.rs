@@ -113,9 +113,19 @@ __device__ __forceinline__ unsigned int xs(unsigned int &s) {
 // Columns of a and b are read as rows of their transposes at and bt.
 __device__ ll warp_delta(const ll* __restrict__ a, const ll* __restrict__ b,
                          const ll* __restrict__ at, const ll* __restrict__ bt,
-                         const int* p, int n, int r, int s, int lane) {
+                         const int* p, int n, int r, int s, int lane, int symmetric) {
     const int pr = p[r], ps = p[s];
     ll d = 0;
+    if (symmetric) {
+        // symmetric matrices, zero diagonal: 2 Σ (a[r][k] − a[s][k]) (b[ps][pk] − b[pr][pk])
+        for (int k = lane; k < n; k += 32) {
+            if (k == r || k == s) continue;
+            const int pk = p[k];
+            d += (a[r * n + k] - a[s * n + k]) * (b[ps * n + pk] - b[pr * n + pk]);
+        }
+        for (int o = 16; o > 0; o >>= 1) d += __shfl_xor_sync(0xffffffffu, d, o);
+        return 2 * d;
+    }
     for (int k = lane; k < n; k += 32) {
         if (k == r || k == s) continue;
         const int pk = p[k];
@@ -133,7 +143,7 @@ extern "C" __global__ void rots(
     const ll* __restrict__ a, const ll* __restrict__ b,
     const ll* __restrict__ at, const ll* __restrict__ bt, int n,
     int* best_perm, ll* delta_all, int* tabu_all, ll* out_cost,
-    long long iters, unsigned int seed, int use_shared)
+    long long iters, unsigned int seed, int use_shared, int symmetric)
 {
     const int blk = blockIdx.x, t = threadIdx.x, T = blockDim.x;
     const int lane = t & 31, warp = t >> 5, warps = T >> 5;
@@ -174,7 +184,7 @@ extern "C" __global__ void rots(
         for (int q = warp; q < nn; q += warps) {
             const int i = q / n, j = q - i * n;
             if (i >= j) continue;
-            const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane);
+            const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane, symmetric);
             if (lane == 0) D[TRI(i, j)] = d;
         }
     }
@@ -225,15 +235,18 @@ extern "C" __global__ void rots(
             const int pk = p[k];
             ca[k] = a[k * n + u] - a[k * n + v];
             cb[k] = b[pk * n + pu] - b[pk * n + pv];
-            ra[k] = a[u * n + k] - a[v * n + k];
-            rb[k] = b[pu * n + pk] - b[pv * n + pk];
+            if (!symmetric) {
+                ra[k] = a[u * n + k] - a[v * n + k];
+                rb[k] = b[pu * n + pk] - b[pv * n + pk];
+            }
         }
         __syncthreads();
         // Taillard's O(1) update of the pairs disjoint from {u, v} ...
         for (int q2 = t; q2 < nn; q2 += T) {
             const int i = q2 / n, j = q2 - i * n;
             if (j <= i || i == u || i == v || j == u || j == v) continue;
-            D[TRI(i, j)] += (ca[i] - ca[j]) * (cb[j] - cb[i]) + (ra[i] - ra[j]) * (rb[j] - rb[i]);
+            const ll f = (ca[i] - ca[j]) * (cb[j] - cb[i]);
+            D[TRI(i, j)] += symmetric ? 2 * f : f + (ra[i] - ra[j]) * (rb[j] - rb[i]);
         }
         // ... and the 2n - 3 pairs touching u or v from scratch, one per warp:
         // slots m < n - 1 are the pairs (u, k), k != u; slots n - 1 .. 2n - 3
@@ -244,7 +257,7 @@ extern "C" __global__ void rots(
             if (k >= x) k++;                // skip x itself
             if (x == v && k == u) continue;
             const int i = min(x, k), j = max(x, k);
-            const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane);
+            const ll d = warp_delta(a, b, at, bt, p, n, i, j, lane, symmetric);
             if (lane == 0) D[TRI(i, j)] = d;
         }
         __syncthreads();
@@ -277,6 +290,8 @@ extern "C" __global__ void rots(
         threads: u32,
         shared_bytes: u32,
         use_shared: bool,
+        /// Symmetric matrices with zero diagonal: half the delta arithmetic.
+        symmetric: bool,
         resident: String,
         host: Vec<i32>,
         device: String,
@@ -333,10 +348,12 @@ extern "C" __global__ void rots(
                 threads,
                 shared_bytes,
                 use_shared,
+                symmetric: inst.symmetric,
                 resident: format!(
-                    "delta matrix in {} memory ({} KB shared per block), {blocks_per_sm} blocks per SM × {sms} SMs",
+                    "delta matrix in {} memory ({} KB shared per block), {} formulas, {blocks_per_sm} blocks per SM × {sms} SMs",
                     if use_shared { "shared" } else { "global" },
-                    shared_bytes.div_ceil(1024)
+                    shared_bytes.div_ceil(1024),
+                    if inst.symmetric { "symmetric" } else { "general" }
                 ),
                 host: vec![0; p * n],
                 device,
@@ -359,6 +376,7 @@ extern "C" __global__ void rots(
             self.stream.memcpy_htod(&self.host, &mut self.best)?;
             let (n32, iters, seed) = (n as i32, iters as i64, seed as u32);
             let use_shared = self.use_shared as i32;
+            let symmetric = self.symmetric as i32;
             let mut launch = self.stream.launch_builder(&self.f);
             launch
                 .arg(&self.a)
@@ -372,7 +390,8 @@ extern "C" __global__ void rots(
                 .arg(&mut self.cost)
                 .arg(&iters)
                 .arg(&seed)
-                .arg(&use_shared);
+                .arg(&use_shared)
+                .arg(&symmetric);
             let cfg = LaunchConfig {
                 grid_dim: (self.p as u32, 1, 1),
                 block_dim: (self.threads, 1, 1),

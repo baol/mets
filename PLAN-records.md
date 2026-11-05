@@ -347,7 +347,12 @@ moves (unless aspired); result remains a permutation.
 200-restart table values (0.66%, 0.59%, 0.87%) are the baseline to beat
 first; the best knowns (4,938,796; 7,205,962; 13,499,184) the target.
 
-## Q3. QAP GPU kernel: symmetric fast path
+## Q3. QAP GPU kernel: symmetric fast path (implemented)
+
+Implemented; the formulas were checked against brute force in a Python
+replica of the kernel (sko42, 40 swaps). On the GPU, the trace's start line
+says "symmetric formulas", and `mismatches=0` is the test.
+
 
 **Why.** sko/tho/wil (the Q1 targets) are symmetric with zero diagonal; the
 CPU model halves the delta work there, the kernel uses the general formula.
