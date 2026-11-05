@@ -1032,10 +1032,20 @@ re-checked for legality.
 | DSJC125.5 | 17 | **17** | 0.1 s |
 | DSJC250.5 | 28 | **28** | 1.4 s |
 | DSJC500.5 | 47 | 49 | 5 s (48 not found in 23 min) |
+| flat300_28_0 | 28 | 31 | 1.5 s (30 not found in 7.5 min) |
+| le450_25c | 25 | 26 | 2.9 s (25 not found in 10 min) |
 
-The best-known values come from methods that run TabuCol for much longer per
-child (HEAD) or use richer crossovers and pool management (MACOL, QA). No
-record has been beaten.
+With HEAD's scheme (`--head`: population 2, children always replace their
+parent, elites, random tie-breaking in TabuCol via `TabuSearch::random_ties`,
+60n iterations per child, as in the authors' code), `DSJC500.5` reaches **48
+colours in 11.6 s**, which the 1999 setting did not find in 23 minutes. 47
+(the record, from HEAD itself and quantum annealing) was not found in two
+one-hour runs. On the queen graphs, `queen15_15` reaches 16 and
+`queen16_16` 17 colours in 1.4 s, one above their known chromatic numbers
+(15 and 16, settled by SAT up to n = 26).
+
+No record has been beaten. The best-known values come from much longer runs
+(hours to weeks per instance) of methods of the same family.
 
 The C++ benchmark source is not committed. It is a 40-line program that
 includes `metslib/mets.hh`, and can be added to METSlib's `test/` if useful.
