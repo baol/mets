@@ -34,7 +34,7 @@
 //!   --polish-from FILE.best  skip the search: k-opt polish this permutation
 //!                    (default K = 9), save the result as NAME.kopt.best
 //! The best permutation found is saved as NAME.best (cost, then the 1-based
-//! facility of each location).
+//! facility of each location), rewritten at every improvement.
 //!
 //! Build and run as `coloring_gpu` (driver and NVRTC at run time):
 //!   cargo run --release --features gpu --example qap_gpu -- tai100a.dat tai100a.sln --trace qap.trace
@@ -1020,6 +1020,8 @@ fn main() {
         if let Some(i) = (0..population).min_by_key(|&i| costs[i]) {
             if costs[i] < best.0 {
                 best = (costs[i], pop[i].clone());
+                // on disk at once, so an interrupted run keeps its best
+                write_perm(&format!("{name}.best"), best.0, &best.1);
             }
         }
         let secs = t0.elapsed().as_secs_f64();
@@ -1109,11 +1111,16 @@ fn main() {
     save(&format!("{name}.best"), best.0, &best.1, best_known);
 }
 
-/// Save a permutation as `cost`, then the 1-based facilities, and report it.
-fn save(out: &str, cost: C, p: &[usize], best_known: Option<C>) {
+/// Write a permutation as `cost`, then the 1-based facilities.
+fn write_perm(out: &str, cost: C, p: &[usize]) {
     let perm: Vec<String> = p.iter().map(|&x| (x + 1).to_string()).collect();
     std::fs::write(out, format!("{cost}\n{}\n", perm.join(" ")))
         .unwrap_or_else(|e| panic!("{out}: {e}"));
+}
+
+/// Save a permutation (see `write_perm`) and report it.
+fn save(out: &str, cost: C, p: &[usize], best_known: Option<C>) {
+    write_perm(out, cost, p);
     let g = best_known.map_or(String::new(), |b| {
         format!(", best known {b} (gap {:.3}%)", gap(cost, b))
     });
