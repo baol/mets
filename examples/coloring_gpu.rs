@@ -25,10 +25,12 @@
 //! directory in LD_LIBRARY_PATH), which compiles the kernel at start-up:
 //!   cargo run --release --features gpu --example coloring_gpu -- \
 //!       DSJC500.5.col --k 47 --trace gpu.trace
-//! Each block keeps its colouring and a 16-bit conflict table (4n + 2nk
-//! bytes; 48 KB for DSJC500.5 at k = 46) in shared memory when they fit;
-//! the tabu table, 8·pairs·n·k bytes of device memory, stays global
-//! (DSJC500.5, k = 46, 2048 pairs: 750 MB). Lower --pairs on large graphs.
+//! Each block keeps its conflict table (16 bits), its list of conflicting
+//! vertices and its colouring (2nk + 3n bytes; 47 KB for DSJC500.5 at
+//! k = 46) in shared memory when they fit; the tabu table, 8·pairs·n·k
+//! bytes of device memory, stays global (DSJC500.5, k = 46, 2048 pairs:
+//! 750 MB). The trace's start line gives the build (git commit) and how many
+//! blocks run at once. Lower --pairs on large graphs.
 
 #[path = "common/qap.rs"]
 mod common; // only for its argument parser
@@ -107,26 +109,28 @@ __device__ __forceinline__ unsigned int xs(unsigned int &s) {
 
 extern "C" __global__ void tabucol(
     const int* __restrict__ start, const int* __restrict__ adj, int n, int k,
-    int* best_color, int* cur_color, unsigned short* gamma, int* tabu, long long* out_cost,
-    long long iters, unsigned int seed, int use_shared)
+    int* best_color, unsigned char* cur_color, unsigned short* gamma, unsigned short* clist,
+    int* tabu, long long* out_cost, long long iters, unsigned int seed, int use_shared)
 {
     const int b = blockIdx.x, t = threadIdx.x, T = blockDim.x;
     const size_t nk = (size_t)n * k;
-    // the current colouring and the conflict table live in shared memory
-    // when they fit (4n + 2nk bytes), else in global memory
+    // the conflict table (16 bits), the list of conflicting vertices (16 bits)
+    // and the current colouring (8 bits) live in shared memory when they fit
+    // (2nk + 3n bytes), else in global memory
     extern __shared__ __align__(8) unsigned char smem[];
     int* best = best_color + (size_t)b * n;
-    int* col = use_shared ? (int*)smem : cur_color + (size_t)b * n;
-    unsigned short* g = use_shared ? (unsigned short*)(smem + 4 * (size_t)n) : gamma + (size_t)b * nk;
+    unsigned short* g = use_shared ? (unsigned short*)smem : gamma + (size_t)b * nk;
+    unsigned short* list = use_shared ? (unsigned short*)(smem + 2 * nk) : clist + (size_t)b * n;
+    unsigned char* col = use_shared ? smem + 2 * nk + 2 * (size_t)n : cur_color + (size_t)b * n;
     int* tb = tabu + (size_t)b * nk;
     __shared__ u64 sel;
-    __shared__ int f, bestf, nconf;
+    __shared__ int f, bestf, nconf, nlist;
     unsigned int rng = seed ^ (0x9E3779B9u * (unsigned)(b * T + t + 1));
     if (rng == 0) rng = 1;
     for (int i = 0; i < 4; i++) xs(rng);
 
     // conflict table, cost and conflicting vertices of the start colouring
-    for (int v = t; v < n; v += T) col[v] = best[v];
+    for (int v = t; v < n; v += T) col[v] = (unsigned char)best[v];
     for (size_t i = t; i < nk; i += T) { g[i] = 0; tb[i] = 0; }
     if (t == 0) { f = 0; nconf = 0; }
     __syncthreads();
@@ -146,28 +150,29 @@ extern "C" __global__ void tabucol(
     __syncthreads();
 
     for (long long it = 1; it <= iters && f > 0; it++) {
-        if (t == 0) sel = ~0ull;
+        if (t == 0) { sel = ~0ull; nlist = 0; }
         __syncthreads();
-        // best admissible recolouring of a conflicting vertex
+        // list the conflicting vertices, so that all threads share their moves
+        for (int v = t; v < n; v += T)
+            if (g[(size_t)v * k + col[v]] > 0) list[atomicAdd(&nlist, 1)] = (unsigned short)v;
+        __syncthreads();
+        // best admissible recolouring of a conflicting vertex: thread t takes
+        // the moves q = t, t + T, ... of the (listed vertex, colour) pairs
         u64 local = ~0ull;
         int local_d = 0x7fffffff;  // delta of `local`: worse moves need no tabu read
-        const int fv = f, bf = bestf;
-        for (int v = t; v < n; v += T) {
+        const int fv = f, bf = bestf, moves = nlist * k;
+        for (int q = t; q < moves; q += T) {
+            const int v = list[q / k], c = q % k;
             const int cv = col[v];
+            if (c == cv) continue;
             const unsigned short* gv = g + (size_t)v * k;
-            const int own = gv[cv];
-            if (own == 0) continue;
-            const int* tv = tb + (size_t)v * k;
-            for (int c = 0; c < k; c++) {
-                if (c == cv) continue;
-                const int d = (int)gv[c] - own;
-                if (d > local_d) continue;
-                if (tv[c] < it || fv + d < bf) {  // not tabu, or aspired
-                    u64 key = ((u64)(unsigned)(d + (1 << 20)) << 40)
-                            | ((u64)(xs(rng) & 0xFFFFFu) << 20)
-                            | (u64)(v * k + c);
-                    if (key < local) { local = key; local_d = d; }
-                }
+            const int d = (int)gv[c] - (int)gv[cv];
+            if (d > local_d) continue;
+            if (tb[(size_t)v * k + c] < it || fv + d < bf) {  // not tabu, or aspired
+                u64 key = ((u64)(unsigned)(d + (1 << 20)) << 40)
+                        | ((u64)(xs(rng) & 0xFFFFFu) << 20)
+                        | (u64)(v * k + c);
+                if (key < local) { local = key; local_d = d; }
             }
         }
         for (int o = 16; o > 0; o >>= 1) {
@@ -196,7 +201,7 @@ extern "C" __global__ void tabucol(
         if (t == 0) {
             const unsigned short* gv = g + (size_t)v * k;
             nconf += (gv[c] > 0) - (gv[old] > 0);
-            col[v] = c;
+            col[v] = (unsigned char)c;
             f += d;
             // Galinier & Hao's tenure: random(0..10) + 0.6 * conflicting vertices
             tb[(size_t)v * k + old] = (int)it + (int)(xs(rng) % 10u) + (int)(0.6f * nconf);
@@ -220,7 +225,8 @@ extern "C" __global__ void tabucol(
         start: CudaSlice<i32>,
         adj: CudaSlice<i32>,
         best: CudaSlice<i32>,
-        cur: CudaSlice<i32>,
+        cur: CudaSlice<u8>,
+        list: CudaSlice<u16>,
         gamma: CudaSlice<u16>,
         tabu: CudaSlice<i32>,
         cost: CudaSlice<i64>,
@@ -230,6 +236,8 @@ extern "C" __global__ void tabucol(
         threads: u32,
         /// Dynamic shared memory per block: 0 when the tables stay in global memory.
         shared_bytes: u32,
+        /// Blocks resident at once (occupancy), for the trace.
+        resident: String,
         host: Vec<i32>,
         device: String,
     }
@@ -252,7 +260,11 @@ extern "C" __global__ void tabucol(
                 "16-bit conflict counts"
             );
             // the colouring and the 16-bit conflict table in shared memory, if they fit
-            let need = 4 * n + 2 * n * k;
+            assert!(
+                k < 256 && n < 1 << 16,
+                "8-bit colours and 16-bit vertex numbers"
+            );
+            let need = 2 * n * k + 3 * n;
             let optin = ctx.attribute(
                 cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
             )? as usize;
@@ -267,7 +279,15 @@ extern "C" __global__ void tabucol(
             } else {
                 0
             };
-            let global_table = if shared_bytes == 0 { p * n * k } else { 1 };
+            let global = |len: usize| if shared_bytes == 0 { len } else { 1 };
+            let blocks_per_sm = f.occupancy_max_active_blocks_per_multiprocessor(
+                threads,
+                shared_bytes as usize,
+                None,
+            )?;
+            let sms = ctx.attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )?;
             let mut start = vec![0i32];
             let mut adj = Vec::with_capacity(2 * g.edges);
             for nb in &g.adj {
@@ -278,8 +298,9 @@ extern "C" __global__ void tabucol(
                 start: stream.clone_htod(&start)?,
                 adj: stream.clone_htod(&adj)?,
                 best: stream.alloc_zeros(p * n)?,
-                cur: stream.alloc_zeros(p * n)?,
-                gamma: stream.alloc_zeros(global_table)?,
+                cur: stream.alloc_zeros(global(p * n))?,
+                list: stream.alloc_zeros(global(p * n))?,
+                gamma: stream.alloc_zeros(global(p * n * k))?,
                 tabu: stream.alloc_zeros(p * n * k)?,
                 cost: stream.alloc_zeros(p)?,
                 stream,
@@ -289,6 +310,7 @@ extern "C" __global__ void tabucol(
                 p,
                 threads,
                 shared_bytes,
+                resident: format!("{blocks_per_sm} blocks per SM × {sms} SMs"),
                 host: vec![0; p * n],
                 device,
             })
@@ -319,6 +341,7 @@ extern "C" __global__ void tabucol(
                 .arg(&mut self.best)
                 .arg(&mut self.cur)
                 .arg(&mut self.gamma)
+                .arg(&mut self.list)
                 .arg(&mut self.tabu)
                 .arg(&mut self.cost)
                 .arg(&iters)
@@ -348,14 +371,11 @@ extern "C" __global__ void tabucol(
         fn name(&self) -> String {
             let tables = match self.shared_bytes {
                 0 => "tables in global memory".to_string(),
-                b => format!(
-                    "colouring and conflict table in {} KB of shared memory",
-                    b.div_ceil(1024)
-                ),
+                b => format!("tables in {} KB of shared memory", b.div_ceil(1024)),
             };
             format!(
-                "GPU {}, {} threads per block, {tables}",
-                self.device, self.threads
+                "GPU {}, {} threads per block, {tables}, {}",
+                self.device, self.threads, self.resident
             )
         }
     }
@@ -453,15 +473,17 @@ fn main() {
         gpu_improver(&g, k, p, threads)
     };
     trace.line(format_args!(
-        "start file={file} n={n} edges={} k={k} pairs={pairs} iters={iters} threads={threads} seed={seed} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
+        "start build={} file={file} n={n} edges={} k={k} pairs={pairs} iters={iters} threads={threads} seed={seed} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
+        env!("METS_GIT_HASH"),
         g.edges,
         improver.name(),
         setup.elapsed().as_secs_f64(),
     ));
     println!(
-        "{file}: {n} vertices, {} edges; {k} colours; {pairs} HEAD pairs × {iters_n}n TabuCol iterations; {}",
+        "{file}: {n} vertices, {} edges; {k} colours; {pairs} HEAD pairs × {iters_n}n TabuCol iterations; {}; build {}",
         g.edges,
-        improver.name()
+        improver.name(),
+        env!("METS_GIT_HASH")
     );
 
     let t0 = Instant::now();

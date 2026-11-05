@@ -1,1 +1,8 @@
 target/
+
+# local benchmark instances and run outputs
+graph-coloring-instances/
+*.trace
+*.log
+*.sol
+nohup.out
