@@ -20,6 +20,11 @@
 //!                    conflicts, improve copies of it in one whole batch, each with
 //!                    its own seed, for --polish-iters L·n iterations (default 0: never)
 //!   --polish-iters L  (default 1000, run as launches of at most 200n)
+//!   --vss-rounds R   after each polish that leaves conflicts, continue the best
+//!                    colouring on every CPU thread (own seed each) with R rounds of
+//!                    Variable Space Search: TabuCol and PartialCol alternating
+//!                    (default 0: off)
+//!   --vss-iters L    iterations per space and round, in units of n (default 100)
 //!   --trace FILE     append one line per batch: time, cost spread, and a CPU
 //!                    recount of a few returned colourings (mismatches = kernel bug)
 //!
@@ -453,6 +458,8 @@ fn main() {
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(3600.0);
     let polish_every: u64 = args.value("--polish-every").unwrap_or(0);
     let polish_iters: u64 = args.value("--polish-iters").unwrap_or(1000);
+    let vss_rounds: usize = args.value("--vss-rounds").unwrap_or(0);
+    let vss_iters: u64 = args.value("--vss-iters").unwrap_or(100);
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let threads: u32 = args.value("--threads").unwrap_or(128);
     let trace_file: Option<String> = args.value("--trace");
@@ -535,6 +542,23 @@ fn main() {
                     }
                 }
                 done += chunk;
+            }
+            // then the other search space, on the CPU threads
+            if vss_rounds > 0 && best.0 > 0 {
+                let start = Coloring::new(&g, k, best.1.clone());
+                let seed0: u64 = rng.random();
+                let results = mets::parallel::run_many(jobs as u64, jobs, |r, cancel| {
+                    let (c, col) = vss(&start, vss_iters * n as u64, vss_rounds, seed0 + r);
+                    if c == 0 {
+                        cancel.cancel();
+                    }
+                    (c, col)
+                });
+                if let Some((_, (c, col))) = results.into_iter().min_by_key(|(_, (c, _))| *c) {
+                    if c < best.0 {
+                        best = (c, col);
+                    }
+                }
             }
             let secs = t.elapsed().as_secs_f64();
             println!(

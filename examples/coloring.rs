@@ -7,6 +7,10 @@
 //! * **HEA**: `Memetic` with the GPX crossover (alternately inherit the
 //!   largest remaining colour class of each parent), TabuCol as the
 //!   improvement step, and a partition distance for population diversity.
+//! * **VSS** (`--vss R`, Hertz, Plumettaz & Zufferey): when HEA fails at k,
+//!   each run's best colouring continues with rounds of TabuCol alternating
+//!   with PartialCol (Blöchliger & Zufferey), a tabu search on legal partial
+//!   colourings that minimises uncoloured vertices.
 //!
 //! For a given k the cost is the number of conflicting edges; a k-colouring is
 //! legal at cost 0. The program starts from a greedy (DSATUR-like) colouring
@@ -23,6 +27,9 @@
 //!   --population P (default 10)
 //!   --replace-parent  one-to-one replacement (a child replaces its parent if better)
 //!   --head         HEAD's scheme: population 2, children always replace their parent, elites every 10
+//!   --vss R        when HEA fails at k, continue each run's best colouring with R rounds of
+//!                  Variable Space Search (TabuCol and PartialCol alternating; default 0: off)
+//!   --vss-iters L  iterations per space and round, in units of n (default 100)
 //!   --bench N      time N plain TabuCol iterations at --k colours, then exit
 
 #[path = "common/qap.rs"]
@@ -55,7 +62,9 @@ struct Settings {
 }
 
 /// One HEA run for k colours from seed `seed`. Returns a legal colouring if found.
-fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> Option<Vec<usize>> {
+/// Returns the best colouring found, as (conflicting edges, colours); a
+/// legal one (cost 0) cancels the other runs.
+fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> (i64, Vec<usize>) {
     let n = g.n();
     let mut start = Coloring::new(g, k, vec![0; n]);
     start.randomize(&mut DefaultRng::seed_from_u64(seed));
@@ -87,10 +96,10 @@ fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> Optio
         .stop_when(|st| st.global_best().cost() == 0)
         .run();
     let best = st.global_best();
-    (best.cost() == 0).then(|| {
+    if best.cost() == 0 {
         cancel.cancel();
-        best.color.clone()
-    })
+    }
+    (best.cost(), best.color.clone())
 }
 
 fn main() {
@@ -98,6 +107,8 @@ fn main() {
     let first_k: Option<usize> = args.value("--k");
     let stop_at: Option<usize> = args.value("--stop-at");
     let bench: Option<u64> = args.value("--bench");
+    let vss_rounds: usize = args.value("--vss").unwrap_or(0);
+    let vss_iters: u64 = args.value("--vss-iters").unwrap_or(100);
     let mut set = Settings {
         generations: args.value("--generations").unwrap_or(2000),
         iters: 0, // set below: 10, or 60 for --head
@@ -159,11 +170,31 @@ fn main() {
     let mut best = greedy_k;
     while k >= 1 && stop_at.is_none_or(|s| best > s) {
         let t = Instant::now();
-        let found = run_many(set.runs, set.jobs, |r, cancel| {
+        let results = run_many(set.runs, set.jobs, |r, cancel| {
             hea(&g, k, r + 1, cancel, &set)
-        })
-        .into_iter()
-        .find_map(|(_, c)| c);
+        });
+        let mut found = results
+            .iter()
+            .find(|(_, (c, _))| *c == 0)
+            .map(|(_, (_, col))| col.clone());
+        if found.is_none() && vss_rounds > 0 {
+            // Variable Space Search from each run's best colouring
+            let left: Vec<i64> = results.iter().map(|(_, (c, _))| *c).collect();
+            let vss_results = run_many(set.runs, set.jobs, |r, cancel| {
+                let start = Coloring::new(&g, k, results[r as usize].1 .1.clone());
+                let (c, col) = vss(&start, vss_iters * g.n() as u64, vss_rounds, r + 1);
+                if c == 0 {
+                    cancel.cancel();
+                }
+                (c, col)
+            });
+            let after: Vec<i64> = vss_results.iter().map(|(_, (c, _))| *c).collect();
+            println!("  {k} colours: HEA left {left:?} conflicts, VSS {after:?}");
+            found = vss_results
+                .into_iter()
+                .find(|(_, (c, _))| *c == 0)
+                .map(|(_, (_, col))| col);
+        }
         match found {
             Some(color) => {
                 assert!(
@@ -289,8 +320,92 @@ mod tests {
         };
         let found = run_many(set.runs, set.jobs, |r, c| hea(&g, k - 1, r + 1, c, &set))
             .into_iter()
-            .find_map(|(_, c)| c)
+            .find_map(|(_, (cost, c))| (cost == 0).then_some(c))
             .expect("one colour fewer than greedy on a small random graph");
         assert!(is_legal(&g, &found) && found.iter().all(|&c| c < k - 1));
+    }
+
+    /// A random legal partial colouring: random colours, then uncolour conflicts.
+    fn random_partial<'g>(g: &'g Graph, k: usize, rng: &mut DefaultRng) -> PartialColoring<'g> {
+        let mut c = Coloring::new(g, k, vec![0; g.n()]);
+        c.randomize(rng);
+        PartialColoring::from_coloring(&c, rng)
+    }
+
+    #[test]
+    fn partial_tables_match_a_recount() {
+        let g = random_graph(40, 0.4, 3);
+        let mut rng = DefaultRng::seed_from_u64(4);
+        let mut s = Evaluated::new(random_partial(&g, 5, &mut rng));
+        for _ in 0..300 {
+            if s.list.is_empty() {
+                break;
+            }
+            let v = s.list[rng.random_range(0..s.list.len())] as usize;
+            s.apply(&Assign {
+                v,
+                c: rng.random_range(0..5),
+            });
+            let fresh = PartialColoring::new(&g, 5, s.color.clone());
+            assert!(s.is_legal_partial());
+            assert_eq!(s.gamma, fresh.gamma);
+            assert_eq!((&s.low, &s.at_low), (&fresh.low, &fresh.at_low));
+            let mut listed = s.list.clone();
+            listed.sort_unstable();
+            assert_eq!(listed, fresh.list);
+            assert!(listed
+                .iter()
+                .all(|&v| s.list[s.pos[v as usize] as usize] == v));
+            assert_eq!(s.cost(), s.evaluate());
+        }
+        let s = Evaluated::new(random_partial(&g, 5, &mut rng));
+        assert!(check::deltas(&mut UncoloredVertices, &s).is_empty());
+    }
+
+    #[test]
+    fn partial_conversions() {
+        let g = random_graph(50, 0.5, 7);
+        let mut rng = DefaultRng::seed_from_u64(8);
+        let greedy = g.dsatur();
+        let k = greedy.iter().max().unwrap() + 1;
+        // a legal colouring has nothing to uncolour, and completes to itself
+        let legal = Coloring::new(&g, k, greedy.clone());
+        let p = PartialColoring::from_coloring(&legal, &mut rng);
+        assert_eq!(p.uncolored(), 0);
+        assert_eq!(p.complete(&mut rng).color, greedy);
+        // one conflicting edge: exactly one uncoloured vertex
+        let (u, v) = (0, g.adj[0][0]);
+        let mut one = greedy.clone();
+        one[u] = greedy[v];
+        let c = Coloring::new(&g, k, one);
+        if c.evaluate() == 1 {
+            assert_eq!(PartialColoring::from_coloring(&c, &mut rng).uncolored(), 1);
+        }
+        // any partial colouring completes to a full one of k colours
+        let p = random_partial(&g, k - 2, &mut rng);
+        let full = p.complete(&mut rng);
+        assert!(full.color.iter().all(|&c| c < k - 2));
+        for v in 0..g.n() {
+            if p.color[v] != UNCOLORED {
+                assert_eq!(
+                    full.color[v], p.color[v],
+                    "complete keeps the coloured part"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vss_colours_a_small_graph() {
+        let g = random_graph(50, 0.5, 7);
+        let k = g.dsatur().iter().max().unwrap() + 1;
+        let mut start = Coloring::new(&g, k - 1, vec![0; 50]);
+        start.randomize(&mut DefaultRng::seed_from_u64(9));
+        let (cost, color) = vss(&start, 5_000, 10, 10);
+        assert_eq!(
+            cost, 0,
+            "one colour fewer than greedy on a small random graph"
+        );
+        assert!(is_legal(&g, &color) && color.iter().all(|&c| c < k - 1));
     }
 }

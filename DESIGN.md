@@ -1175,6 +1175,20 @@ each vertex's smallest γ (a lower bound on its recolouring deltas), and
 `Visitor::can_skip` lets the tabu search prune with random ties: 210,000 →
 337,000 iterations/s on DSJC500.5 at k = 48 (`coloring --bench`, one core).
 
+**Variable Space Search.** `examples/common/coloring.rs` adds PartialCol
+(Blöchliger & Zufferey): legal partial colourings, cost = uncoloured
+vertices, move = colour an uncoloured vertex and uncolour its neighbours of
+that colour, tabu on giving those neighbours the colour back. It is a
+`Model`, a `Move`, a custom `TabuList` (one move makes several keys tabu)
+and a `Neighborhood` using `can_skip`, run by the library's `TabuSearch`.
+`vss()` alternates it with TabuCol (Hertz, Plumettaz & Zufferey). From the
+same stuck TabuCol solutions (DSJC500.5, k = 48, 1 M iterations from 8
+random starts), 2 M more iterations of TabuCol end at 8.1 conflicts on
+average; 20 VSS rounds of 50,000 iterations per space end at 6.5, never
+worse on any seed, in 40–60% less time (PartialCol iterations are cheaper).
+`coloring --vss R` applies it to the runs of a failed k; `coloring_gpu
+--vss-rounds R` after each polish, on the CPU threads.
+
 **GPU (`examples/coloring_gpu.rs`, `--features gpu`).** HEAD runs as many
 independent pairs; each generation's children are improved in one batch by
 a CUDA kernel (one block per individual, compiled at start-up by NVRTC

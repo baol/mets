@@ -38,7 +38,12 @@ Current position (sandbox, 4 cores, plus the user's RTX 3060):
 | colouring | DSJC500.5 | 48 (47 reached 1 conflict on GPU) | 47 | 47 is believed optimal; 46 is not a target |
 | colouring | large DIMACS | not attempted | moved in the last decade | the realistic colouring frontier |
 
-## A1. Colouring: PartialCol search space and Variable Space Search
+## A1. Colouring: PartialCol search space and Variable Space Search (done)
+
+Implemented as specified (see DESIGN.md, "Variable Space Search"): at
+equal iterations VSS beat TabuCol alone on 5 of 8 stuck DSJC500.5 k = 48
+solutions and tied on 3. Remaining: the GPU run of A1.8.
+
 
 **Why.** The 47-colour run on DSJC500.5 (GPU, 112 HEAD pairs, 7.7 M TabuCol
 it/s) reached 1 conflict after 25 minutes and stayed there for 35 more.
