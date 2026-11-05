@@ -8,7 +8,8 @@
 //! * [`BestRearrangement`]: a very large neighborhood for
 //!   [`LargeNeighborhoodSearch`](crate::LargeNeighborhoodSearch): all k!
 //!   arrangements of k random positions.
-//! * [`UniformCrossover`] for [`Memetic`](crate::Memetic), and
+//! * [`UniformCrossover`] and [`CohesiveCrossover`] (Drezner) for
+//!   [`Memetic`](crate::Memetic), and
 //!   [`adaptive_perturbation`] for [`IteratedSearch`](crate::IteratedSearch).
 
 use crate::ils::Adaptive;
@@ -451,6 +452,104 @@ impl<S: Permutation> Crossover<S> for UniformCrossover {
         for (&i, e) in empty.iter().zip(free) {
             target[i] = e;
         }
+        rearrange(child, &target);
+    }
+}
+
+/// Drezner's cohesive crossover (the merging step of his hybrid genetic
+/// algorithm for the QAP): the child keeps parent `a`'s elements on a set of
+/// mutually close positions, a ball around a random pivot under a distance
+/// between positions, and takes parent `b`'s elsewhere. Uniform crossover
+/// ignores the geometry of instances whose positions are locations on a grid
+/// (sko, tho, wil); this one inherits whole neighbourhoods.
+///
+/// With [`over_elements`](Self::over_elements) the distance is between
+/// elements instead: the ball is a set of close elements, and the child
+/// keeps `a`'s positions of those elements.
+#[derive(Clone, Debug)]
+pub struct CohesiveCrossover {
+    /// `order[x]`: all indices by increasing distance to `x` (`x` first).
+    order: Vec<Vec<u32>>,
+    over_elements: bool,
+    /// The ball holds a random fraction of the positions in this range.
+    pub fraction: (f64, f64),
+}
+
+impl CohesiveCrossover {
+    /// `distance(x, y)` between positions `0..n`.
+    pub fn new(n: usize, distance: impl Fn(usize, usize) -> f64) -> Self {
+        let order = (0..n)
+            .map(|x| {
+                let mut row: Vec<u32> = (0..n as u32).collect();
+                // x first, then by distance (ties by index, for determinism)
+                row.sort_by(|&p, &q| {
+                    let key = |y: u32| (y as usize != x, distance(x, y as usize));
+                    key(p).partial_cmp(&key(q)).unwrap().then(p.cmp(&q))
+                });
+                row
+            })
+            .collect();
+        CohesiveCrossover {
+            order,
+            over_elements: false,
+            fraction: (0.25, 0.75),
+        }
+    }
+
+    /// The distance passed to `new` is between elements, not positions.
+    pub fn over_elements(mut self) -> Self {
+        self.over_elements = true;
+        self
+    }
+
+    /// The child (as a target permutation) for a ball of `m` indices around
+    /// `pivot`: `a` on the ball, `b` where its element is still free, then the
+    /// remaining elements in the order they appear in `b`.
+    pub fn child_with(&self, a: &[usize], b: &[usize], pivot: usize, m: usize) -> Vec<usize> {
+        let n = a.len();
+        let ball = &self.order[pivot][..m.min(n)];
+        let mut keep = vec![false; n]; // positions taken from a
+        if self.over_elements {
+            let mut close = vec![false; n];
+            ball.iter().for_each(|&e| close[e as usize] = true);
+            (0..n).for_each(|i| keep[i] = close[a[i]]);
+        } else {
+            ball.iter().for_each(|&i| keep[i as usize] = true);
+        }
+        let mut target = vec![usize::MAX; n];
+        let mut used = vec![false; n];
+        for i in 0..n {
+            if keep[i] {
+                target[i] = a[i];
+                used[a[i]] = true;
+            }
+        }
+        for i in 0..n {
+            if !keep[i] && !used[b[i]] {
+                target[i] = b[i];
+                used[b[i]] = true;
+            }
+        }
+        let mut free = b.iter().copied().filter(|&e| !used[e]);
+        for t in target.iter_mut().filter(|t| **t == usize::MAX) {
+            *t = free
+                .next()
+                .expect("as many free elements as empty positions");
+        }
+        target
+    }
+}
+
+impl<S: Permutation> Crossover<S> for CohesiveCrossover {
+    fn cross(&mut self, a: &S, b: &S, child: &mut S, rng: &mut dyn RngCore) {
+        let n = a.size();
+        if n < 2 {
+            return;
+        }
+        let lo = ((self.fraction.0 * n as f64).ceil() as usize).clamp(1, n - 1);
+        let hi = ((self.fraction.1 * n as f64).floor() as usize).clamp(lo, n - 1);
+        let (pivot, m) = (rng.random_range(0..n), rng.random_range(lo..=hi));
+        let target = self.child_with(a.as_slice(), b.as_slice(), pivot, m);
         rearrange(child, &target);
     }
 }

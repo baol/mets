@@ -17,6 +17,8 @@
 //!   --iters L        tabu iterations per child, in units of n (default 100)
 //!   --max-seconds T  give up after T seconds (default 3600)
 //!   --run-to-end     do not stop at the best-known value
+//!   --crossover X    uniform | cohesive (Drezner: one parent's elements on a ball of
+//!                    close positions; uniform without a distance matrix) (default uniform)
 //!   --stagnation G   a member whose children have not beaten it for G generations
 //!                    restarts from a random permutation (default 0: never)
 //!   --seed S         (default 1)
@@ -467,6 +469,9 @@ fn main() {
         .unwrap_or(if cpu { jobs } else { 224 });
     let iters_n: u64 = args.value("--iters").unwrap_or(100);
     let stagnation: u64 = args.value("--stagnation").unwrap_or(0);
+    let crossover: String = args
+        .value("--crossover")
+        .unwrap_or_else(|| "uniform".into());
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(3600.0);
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let threads: u32 = args.value("--threads").unwrap_or(256);
@@ -518,7 +523,17 @@ fn main() {
     trace.batch(0, &inst, &pop, &costs, t.elapsed().as_secs_f64());
     let mut best = (C::MAX, Vec::new());
     let mut children = pop.clone();
-    let mut cross = UniformCrossover;
+    let mut cross: Box<dyn Crossover<QapPlain>> = match crossover.as_str() {
+        "uniform" => Box::new(UniformCrossover),
+        "cohesive" => match inst.cohesive_crossover() {
+            Some(x) => Box::new(x),
+            None => {
+                eprintln!("note: no distance matrix in this instance; using uniform crossover");
+                Box::new(UniformCrossover)
+            }
+        },
+        x => panic!("unknown crossover {x:?} (uniform, cohesive)"),
+    };
     let mut since = vec![0u64; population]; // generations since member i improved
     let mut restarts = 0u64;
     for generation in 1.. {

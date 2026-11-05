@@ -29,7 +29,9 @@
 //!   --method M     memetic | restarts | lns | ma (default memetic)
 //!   --steps N      per run: children / restarts (default 50; ma 100000), or rebuilds for lns (default 1500000)
 //!   --population P memetic / ma: population size (default 10; ma 40)
-//!   --crossover X  memetic: uniform | path (path relinking half-way, DE-style) (default uniform)
+//!   --crossover X  memetic / ma: uniform | path (path relinking half-way, DE-style) |
+//!                  cohesive (Drezner: one parent's elements on a ball of close positions;
+//!                  uniform on instances without a distance matrix) (default uniform)
 //!   --replacement Y  memetic: niche (closest member or worst) | parent (DE one-to-one) (default niche)
 //!   --k K          lns: positions rearranged per step (default 5)
 //!   --runs R       independent runs (default 4)
@@ -106,19 +108,41 @@ enum Migration {
     Part,
 }
 
-/// The two permutation recombinations of the library, chosen at run time.
+/// The permutation recombinations of the library, chosen at run time.
 #[derive(Clone, Copy, PartialEq)]
 enum Recombine {
     Uniform,
     /// Path relinking half-way: DE's `a + F·(b − a)` with F = 0.5.
     Path,
+    /// Drezner's cohesive crossover on the instance's distance matrix
+    /// (uniform when the instance has none).
+    Cohesive,
 }
 
-impl<S: perm::Permutation> Crossover<S> for Recombine {
+/// A [`Recombine`] made for one instance (the cohesive crossover needs its
+/// distances).
+enum Recombiner {
+    Uniform,
+    Path,
+    Cohesive(perm::CohesiveCrossover),
+}
+
+impl Recombiner {
+    fn new(r: Recombine, inst: &Instance) -> Self {
+        match (r, inst.cohesive_crossover()) {
+            (Recombine::Uniform, _) | (Recombine::Cohesive, None) => Recombiner::Uniform,
+            (Recombine::Path, _) => Recombiner::Path,
+            (Recombine::Cohesive, Some(x)) => Recombiner::Cohesive(x),
+        }
+    }
+}
+
+impl<S: perm::Permutation> Crossover<S> for Recombiner {
     fn cross(&mut self, a: &S, b: &S, child: &mut S, rng: &mut dyn mets::rand::RngCore) {
         match self {
-            Recombine::Uniform => UniformCrossover.cross(a, b, child, rng),
-            Recombine::Path => perm::PathRelinking { fraction: 0.5 }.cross(a, b, child, rng),
+            Recombiner::Uniform => UniformCrossover.cross(a, b, child, rng),
+            Recombiner::Path => perm::PathRelinking { fraction: 0.5 }.cross(a, b, child, rng),
+            Recombiner::Cohesive(x) => x.cross(a, b, child, rng),
         }
     }
 }
@@ -155,7 +179,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
                 improvement(n, cancel),
                 NoImprovement::new(20).or(cancel),
                 fresh(),
-                set.crossover,
+                Recombiner::new(set.crossover, inst),
                 set.population,
             )
             .with_distance(
@@ -210,7 +234,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
                 perm::SwapDescent::new(),
                 cancel,
                 fresh,
-                set.crossover,
+                Recombiner::new(set.crossover, inst),
                 set.population,
             )
             .with_distance(|a: &QapPlain, b: &QapPlain| perm::hamming(a, b), n / 10)
@@ -249,7 +273,7 @@ fn ma_islands(inst: &Instance, target: Option<C>, set: &Settings) -> Vec<C> {
             perm::SwapDescent::new(),
             island.cancel,
             fresh,
-            set.crossover,
+            Recombiner::new(set.crossover, inst),
             set.population,
         )
         .with_distance(|a: &QapPlain, b: &QapPlain| perm::hamming(a, b), n / 10)
@@ -294,6 +318,11 @@ fn ma_islands(inst: &Instance, target: Option<C>, set: &Settings) -> Vec<C> {
 
 fn solve(inst: &Instance, best_known: Option<C>, set: &Settings) -> Solved {
     let target = best_known.filter(|_| set.stop_at_best);
+    if set.crossover == Recombine::Cohesive && inst.distance().is_none() {
+        eprintln!(
+            "note: no distance matrix in this instance; cohesive crossover falls back to uniform"
+        );
+    }
     let t0 = Instant::now();
     if set.method == Method::Ma && set.migrate_every > 0 {
         let found = ma_islands(inst, target, set)
@@ -362,7 +391,8 @@ fn main() {
         crossover: match args.value::<String>("--crossover").as_deref() {
             None | Some("uniform") => Recombine::Uniform,
             Some("path") => Recombine::Path,
-            Some(x) => panic!("unknown crossover {x:?} (uniform, path)"),
+            Some("cohesive") => Recombine::Cohesive,
+            Some(x) => panic!("unknown crossover {x:?} (uniform, path, cohesive)"),
         },
         replace_parent: match args.value::<String>("--replacement").as_deref() {
             None | Some("niche") => false,

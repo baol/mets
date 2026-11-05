@@ -517,3 +517,50 @@ fn a_received_migrant_is_the_second_parent_of_the_next_child() {
     assert_eq!(*seen.lock().unwrap(), vec![0]);
     assert_eq!(memetic.population().len(), 3);
 }
+
+#[test]
+fn cohesive_crossover_keeps_a_ball_of_one_parent() {
+    // positions on a line: distance |x - y|
+    let n = 20;
+    let x = perm::CohesiveCrossover::new(n, |p, q| (p as f64 - q as f64).abs());
+    let mut r = rng(11);
+    let a: Vec<usize> = (0..n).collect();
+    let mut b = a.clone();
+    for i in (1..n).rev() {
+        b.swap(i, mets::rand::Rng::random_range(&mut r, 0..=i));
+    }
+    // the ball of 5 around position 10 is 8..=12 (ties by index: 9, 11, 8, 12)
+    let child = x.child_with(&a, &b, 10, 5);
+    assert!(is_permutation(&child));
+    for i in 8..=12 {
+        assert_eq!(child[i], a[i], "ball position {i} comes from a");
+    }
+    for i in (0..n).filter(|i| !(8..=12).contains(i)) {
+        if !(8..=12).contains(&b[i]) {
+            assert_eq!(child[i], b[i], "free element of b kept at {i}");
+        }
+    }
+    // identical parents give the parent, whatever the ball
+    assert_eq!(x.child_with(&a, &a, 3, 7), a);
+    // over elements: the ball is of elements; a keeps their positions
+    let xe = perm::CohesiveCrossover::new(n, |p, q| (p as f64 - q as f64).abs()).over_elements();
+    let child = xe.child_with(&b, &a, 0, 3); // elements 0, 1, 2 stay where b has them
+    for e in 0..3 {
+        let i = b.iter().position(|&x| x == e).unwrap();
+        assert_eq!(child[i], e);
+    }
+    // through the Crossover trait the child stays a permutation, and the
+    // fraction bounds hold: at least a quarter of the positions come from a
+    let (mut pa, mut pb) = (Sort(a.clone()), Sort(b.clone()));
+    let mut x = x;
+    for _ in 0..50 {
+        let mut child = pa.clone();
+        x.cross(&pa, &pb, &mut child, &mut r);
+        assert!(is_permutation(child.as_slice()));
+        let from_a = (0..n)
+            .filter(|&i| child.as_slice()[i] == pa.as_slice()[i])
+            .count();
+        assert!(from_a >= n / 4, "{from_a}");
+        std::mem::swap(&mut pa, &mut pb);
+    }
+}
