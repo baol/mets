@@ -17,6 +17,8 @@
 //!   --iters L        tabu iterations per child, in units of n (default 100)
 //!   --max-seconds T  give up after T seconds (default 3600)
 //!   --run-to-end     do not stop at the best-known value
+//!   --stagnation G   a member whose children have not beaten it for G generations
+//!                    restarts from a random permutation (default 0: never)
 //!   --seed S         (default 1)
 //!   --threads T      GPU threads per block (default 256)
 //!   --cpu            improve on the CPU threads instead of the GPU
@@ -406,6 +408,7 @@ fn main() {
         .value("--population")
         .unwrap_or(if cpu { jobs } else { 224 });
     let iters_n: u64 = args.value("--iters").unwrap_or(100);
+    let stagnation: u64 = args.value("--stagnation").unwrap_or(0);
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(3600.0);
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let threads: u32 = args.value("--threads").unwrap_or(256);
@@ -458,6 +461,8 @@ fn main() {
     let mut best = (C::MAX, Vec::new());
     let mut children = pop.clone();
     let mut cross = UniformCrossover;
+    let mut since = vec![0u64; population]; // generations since member i improved
+    let mut restarts = 0u64;
     for generation in 1.. {
         if let Some(i) = (0..population).min_by_key(|&i| costs[i]) {
             if costs[i] < best.0 {
@@ -469,7 +474,7 @@ fn main() {
         if generation % 10 == 1 || reached {
             let g = best_known.map_or(String::new(), |b| format!(" (gap {:.3}%)", gap(best.0, b)));
             println!(
-                "  generation {generation:5}: best {}{g}, {secs:7.1} s",
+                "  generation {generation:5}: best {}{g}, {secs:7.1} s, {restarts} restarts",
                 best.0
             );
         }
@@ -478,6 +483,13 @@ fn main() {
         }
         // each member's child with a random other member
         for i in 0..population {
+            if stagnation > 0 && since[i] >= stagnation {
+                // stagnant: this member's next child is a fresh random start
+                children[i] = random_start(n, rng.random());
+                (costs[i], since[i]) = (C::MAX, 0);
+                restarts += 1;
+                continue;
+            }
             let mut j = rng.random_range(0..population - 1);
             if j >= i {
                 j += 1;
@@ -512,7 +524,9 @@ fn main() {
         for i in 0..population {
             if child_costs[i] < costs[i] {
                 std::mem::swap(&mut pop[i], &mut children[i]);
-                costs[i] = child_costs[i];
+                (costs[i], since[i]) = (child_costs[i], 0);
+            } else {
+                since[i] += 1;
             }
         }
     }
