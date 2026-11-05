@@ -25,8 +25,10 @@
 //! directory in LD_LIBRARY_PATH), which compiles the kernel at start-up:
 //!   cargo run --release --features gpu --example coloring_gpu -- \
 //!       DSJC500.5.col --k 47 --trace gpu.trace
-//! Device memory is about 16·pairs·n·k bytes (DSJC500.5, k = 47, 1024 pairs:
-//! 390 MB); lower --pairs on large graphs.
+//! Each block keeps its colouring and a 16-bit conflict table (4n + 2nk
+//! bytes; 48 KB for DSJC500.5 at k = 46) in shared memory when they fit;
+//! the tabu table, 8·pairs·n·k bytes of device memory, stays global
+//! (DSJC500.5, k = 46, 2048 pairs: 750 MB). Lower --pairs on large graphs.
 
 #[path = "common/qap.rs"]
 mod common; // only for its argument parser
@@ -105,14 +107,17 @@ __device__ __forceinline__ unsigned int xs(unsigned int &s) {
 
 extern "C" __global__ void tabucol(
     const int* __restrict__ start, const int* __restrict__ adj, int n, int k,
-    int* best_color, int* cur_color, int* gamma, int* tabu, long long* out_cost,
-    long long iters, unsigned int seed)
+    int* best_color, int* cur_color, unsigned short* gamma, int* tabu, long long* out_cost,
+    long long iters, unsigned int seed, int use_shared)
 {
     const int b = blockIdx.x, t = threadIdx.x, T = blockDim.x;
     const size_t nk = (size_t)n * k;
+    // the current colouring and the conflict table live in shared memory
+    // when they fit (4n + 2nk bytes), else in global memory
+    extern __shared__ __align__(8) unsigned char smem[];
     int* best = best_color + (size_t)b * n;
-    int* col = cur_color + (size_t)b * n;
-    int* g = gamma + (size_t)b * nk;
+    int* col = use_shared ? (int*)smem : cur_color + (size_t)b * n;
+    unsigned short* g = use_shared ? (unsigned short*)(smem + 4 * (size_t)n) : gamma + (size_t)b * nk;
     int* tb = tabu + (size_t)b * nk;
     __shared__ u64 sel;
     __shared__ int f, bestf, nconf;
@@ -149,13 +154,13 @@ extern "C" __global__ void tabucol(
         const int fv = f, bf = bestf;
         for (int v = t; v < n; v += T) {
             const int cv = col[v];
-            const int* gv = g + (size_t)v * k;
+            const unsigned short* gv = g + (size_t)v * k;
             const int own = gv[cv];
             if (own == 0) continue;
             const int* tv = tb + (size_t)v * k;
             for (int c = 0; c < k; c++) {
                 if (c == cv) continue;
-                const int d = gv[c] - own;
+                const int d = (int)gv[c] - own;
                 if (d > local_d) continue;
                 if (tv[c] < it || fv + d < bf) {  // not tabu, or aspired
                     u64 key = ((u64)(unsigned)(d + (1 << 20)) << 40)
@@ -181,7 +186,7 @@ extern "C" __global__ void tabucol(
         int lc = 0;
         for (int e = start[v] + t; e < start[v + 1]; e += T) {
             const int u = adj[e], cu = col[u];
-            int* gu = g + (size_t)u * k;
+            unsigned short* gu = g + (size_t)u * k;
             if (cu == old) lc -= (gu[old] == 1);
             else if (cu == c) lc += (gu[c] == 0);
             gu[old]--; gu[c]++;
@@ -189,7 +194,7 @@ extern "C" __global__ void tabucol(
         if (lc) atomicAdd(&nconf, lc);
         __syncthreads();
         if (t == 0) {
-            const int* gv = g + (size_t)v * k;
+            const unsigned short* gv = g + (size_t)v * k;
             nconf += (gv[c] > 0) - (gv[old] > 0);
             col[v] = c;
             f += d;
@@ -216,13 +221,15 @@ extern "C" __global__ void tabucol(
         adj: CudaSlice<i32>,
         best: CudaSlice<i32>,
         cur: CudaSlice<i32>,
-        gamma: CudaSlice<i32>,
+        gamma: CudaSlice<u16>,
         tabu: CudaSlice<i32>,
         cost: CudaSlice<i64>,
         n: usize,
         k: usize,
         p: usize,
         threads: u32,
+        /// Dynamic shared memory per block: 0 when the tables stay in global memory.
+        shared_bytes: u32,
         host: Vec<i32>,
         device: String,
     }
@@ -240,6 +247,27 @@ extern "C" __global__ void tabucol(
             let stream = ctx.default_stream();
             let ptx = cudarc::nvrtc::compile_ptx(KERNEL)?;
             let f = ctx.load_module(ptx)?.load_function("tabucol")?;
+            assert!(
+                g.adj.iter().all(|nb| nb.len() < 1 << 16),
+                "16-bit conflict counts"
+            );
+            // the colouring and the 16-bit conflict table in shared memory, if they fit
+            let need = 4 * n + 2 * n * k;
+            let optin = ctx.attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            )? as usize;
+            let shared_bytes = if need <= optin {
+                if need > 48 * 1024 {
+                    f.set_attribute(
+                        cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        need as i32,
+                    )?;
+                }
+                need as u32
+            } else {
+                0
+            };
+            let global_table = if shared_bytes == 0 { p * n * k } else { 1 };
             let mut start = vec![0i32];
             let mut adj = Vec::with_capacity(2 * g.edges);
             for nb in &g.adj {
@@ -251,7 +279,7 @@ extern "C" __global__ void tabucol(
                 adj: stream.clone_htod(&adj)?,
                 best: stream.alloc_zeros(p * n)?,
                 cur: stream.alloc_zeros(p * n)?,
-                gamma: stream.alloc_zeros(p * n * k)?,
+                gamma: stream.alloc_zeros(global_table)?,
                 tabu: stream.alloc_zeros(p * n * k)?,
                 cost: stream.alloc_zeros(p)?,
                 stream,
@@ -260,6 +288,7 @@ extern "C" __global__ void tabucol(
                 k,
                 p,
                 threads,
+                shared_bytes,
                 host: vec![0; p * n],
                 device,
             })
@@ -280,6 +309,7 @@ extern "C" __global__ void tabucol(
             }
             self.stream.memcpy_htod(&self.host, &mut self.best)?;
             let (n32, k32, iters, seed) = (n as i32, self.k as i32, iters as i64, seed as u32);
+            let use_shared = (self.shared_bytes > 0) as i32;
             let mut launch = self.stream.launch_builder(&self.f);
             launch
                 .arg(&self.start)
@@ -292,11 +322,12 @@ extern "C" __global__ void tabucol(
                 .arg(&mut self.tabu)
                 .arg(&mut self.cost)
                 .arg(&iters)
-                .arg(&seed);
+                .arg(&seed)
+                .arg(&use_shared);
             let cfg = LaunchConfig {
                 grid_dim: (self.p as u32, 1, 1),
                 block_dim: (self.threads, 1, 1),
-                shared_mem_bytes: 0,
+                shared_mem_bytes: self.shared_bytes,
             };
             unsafe { launch.launch(cfg) }?;
             self.stream.memcpy_dtoh(&self.best, &mut self.host)?;
@@ -315,7 +346,17 @@ extern "C" __global__ void tabucol(
             self.run(batch, iters, seed).expect("GPU TabuCol")
         }
         fn name(&self) -> String {
-            format!("GPU {}, {} threads per block", self.device, self.threads)
+            let tables = match self.shared_bytes {
+                0 => "tables in global memory".to_string(),
+                b => format!(
+                    "colouring and conflict table in {} KB of shared memory",
+                    b.div_ceil(1024)
+                ),
+            };
+            format!(
+                "GPU {}, {} threads per block, {tables}",
+                self.device, self.threads
+            )
         }
     }
 }
@@ -412,11 +453,10 @@ fn main() {
         gpu_improver(&g, k, p, threads)
     };
     trace.line(format_args!(
-        "start file={file} n={n} edges={} k={k} pairs={pairs} iters={iters} threads={threads} seed={seed} improver=\"{}\" setup_s={:.3} (includes NVRTC compile) device_bytes={}",
+        "start file={file} n={n} edges={} k={k} pairs={pairs} iters={iters} threads={threads} seed={seed} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
         g.edges,
         improver.name(),
         setup.elapsed().as_secs_f64(),
-        if cpu { 0 } else { 4 * (2 * p * n + 2 * p * n * k + n + 1 + 2 * g.edges) + 8 * p }
     ));
     println!(
         "{file}: {n} vertices, {} edges; {k} colours; {pairs} HEAD pairs × {iters_n}n TabuCol iterations; {}",
