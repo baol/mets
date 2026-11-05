@@ -1031,6 +1031,18 @@ independent runs on 4 threads, best of them; times are wall-clock.
   | wil100 | 273,038 | ma, 27 min |
 
   Ties, not records: these values have stood for decades.
+* Islands (`--migrate-every G`, `parallel::islands`): 4 islands against 4
+  independent `ma` runs, wall time to the best-known value, 5 trials each:
+
+  | instance | independent | migrate every 50 | migrate every 500 |
+  |---|---|---|---|
+  | tai100b, avg (median) | 9.4 s (8.5) | 14.0 s (11.7) | 8.9 s (8.4) |
+  | sko100a, avg (median), reached | 43 s (45), 5/5 | 116 s (69), 5/5 | 37 s (16), 4/5 |
+
+  Frequent migration hurts: the best member spreads to every island and the
+  synchronised exchange makes fast islands wait for slow ones. Rare migration
+  is on par with independent runs within this noise. Migration stays off by
+  default.
 * Time to the best-known value, one core per run, 5 seeds, memetic search
   stopping at the target (`--runs 1 --jobs 1 --first-seed s`), against
   Merz & Freisleben's memetic algorithm (CEC 1999, Table 2: one core of a
