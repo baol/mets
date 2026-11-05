@@ -17,6 +17,19 @@ pub trait Visitor<M, C> {
     fn bound(&self) -> Option<C> {
         None
     }
+
+    /// True when no move whose delta is `>= lower` can be selected anymore,
+    /// so a neighborhood that knows a lower bound on the deltas of a group of
+    /// moves may skip the whole group. Unlike [`bound`](Self::bound), this
+    /// also works for visitors that may still take a move *equal* to the
+    /// best so far (random tie-breaking): they skip only `lower > best`.
+    #[inline]
+    fn can_skip(&self, lower: C) -> bool
+    where
+        C: PartialOrd,
+    {
+        self.bound().is_some_and(|b| lower >= b)
+    }
 }
 
 impl<M, C, F: FnMut(M, C) -> ControlFlow<()>> Visitor<M, C> for F {

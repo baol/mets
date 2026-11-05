@@ -112,7 +112,7 @@ impl<'g> Neighborhood<Coloring<'g>> for ConflictingVertices {
             if own == 0 {
                 continue; // not conflicting
             }
-            if vis.bound().is_some_and(|b| -own >= b) {
+            if vis.can_skip(-own) {
                 continue; // pruned: no colour of v can be selected
             }
             for c in 0..s.k {

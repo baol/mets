@@ -23,6 +23,7 @@
 //!   --population P (default 10)
 //!   --replace-parent  one-to-one replacement (a child replaces its parent if better)
 //!   --head         HEAD's scheme: population 2, children always replace their parent, elites every 10
+//!   --bench N      time N plain TabuCol iterations at --k colours, then exit
 
 #[path = "common/qap.rs"]
 mod common; // only for its argument parser
@@ -108,15 +109,25 @@ impl Graph {
 // ---------------------------------------------------------------- model
 
 /// A k-colouring with its conflict table: `gamma[v·k + c]` = neighbours of v
-/// coloured c. Tracks the number of conflicting vertices for the tenure.
+/// coloured c. Also keeps, incrementally:
+/// * the list of conflicting vertices, so a scan does not visit all n;
+/// * for each vertex, the smallest gamma over all colours and how many
+///   colours reach it: `low[v] − gamma[v][colour]` bounds the delta of every
+///   recolouring of v from below, which lets the scan skip vertices.
 #[derive(Clone)]
 struct Coloring<'g> {
     g: &'g Graph,
     k: usize,
     color: Vec<usize>,
     gamma: Vec<u32>,
-    conflicting: usize,
+    low: Vec<u32>,
+    at_low: Vec<u32>,
+    /// Conflicting vertices, in any order, and each vertex's index in it.
+    list: Vec<u32>,
+    pos: Vec<u32>,
 }
+
+const OUT: u32 = u32::MAX;
 
 impl<'g> Coloring<'g> {
     fn new(g: &'g Graph, k: usize, color: Vec<usize>) -> Self {
@@ -125,13 +136,16 @@ impl<'g> Coloring<'g> {
             k,
             color,
             gamma: Vec::new(),
-            conflicting: 0,
+            low: Vec::new(),
+            at_low: Vec::new(),
+            list: Vec::new(),
+            pos: Vec::new(),
         };
         s.rebuild();
         s
     }
 
-    /// Recompute the conflict table from the colours.
+    /// Recompute every table from the colours.
     fn rebuild(&mut self) {
         let (n, k) = (self.g.n(), self.k);
         self.gamma.clear();
@@ -141,7 +155,31 @@ impl<'g> Coloring<'g> {
                 self.gamma[v * k + self.color[u]] += 1;
             }
         }
-        self.conflicting = (0..n).filter(|&v| self.in_conflict(v)).count();
+        self.low.resize(n, 0);
+        self.at_low.resize(n, 0);
+        (0..n).for_each(|v| self.rescan_low(v));
+        self.list.clear();
+        self.pos.clear();
+        self.pos.resize(n, OUT);
+        for v in 0..n {
+            if self.in_conflict(v) {
+                self.pos[v] = self.list.len() as u32;
+                self.list.push(v as u32);
+            }
+        }
+    }
+
+    fn rescan_low(&mut self, v: usize) {
+        let row = &self.gamma[v * self.k..][..self.k];
+        let low = *row.iter().min().expect("k >= 1");
+        self.low[v] = low;
+        self.at_low[v] = row.iter().filter(|&&g| g == low).count() as u32;
+    }
+
+    /// Number of conflicting vertices (for the tenure).
+    #[inline]
+    fn conflicting(&self) -> usize {
+        self.list.len()
     }
 
     #[inline]
@@ -152,6 +190,27 @@ impl<'g> Coloring<'g> {
     #[inline]
     fn in_conflict(&self, v: usize) -> bool {
         self.gamma[v * self.k + self.color[v]] > 0
+    }
+
+    /// Put v in or out of the conflict list to match its state.
+    #[inline]
+    fn sync(&mut self, v: usize) {
+        match (self.in_conflict(v), self.pos[v] != OUT) {
+            (true, false) => {
+                self.pos[v] = self.list.len() as u32;
+                self.list.push(v as u32);
+            }
+            (false, true) => {
+                let i = self.pos[v] as usize;
+                let last = self.list.pop().expect("v is listed");
+                if last as usize != v {
+                    self.list[i] = last;
+                    self.pos[last as usize] = i as u32;
+                }
+                self.pos[v] = OUT;
+            }
+            _ => {}
+        }
     }
 
     fn randomize(&mut self, rng: &mut dyn RngCore) {
@@ -189,17 +248,30 @@ impl<'g> Move<Coloring<'g>> for Recolor {
     fn apply(&self, s: &mut Coloring<'g>) {
         let (v, new, k) = (self.v, self.c, s.k);
         let old = s.color[v];
-        let was = s.in_conflict(v) as isize;
-        let mut change = 0isize;
-        for &u in &s.g.adj[v] {
-            let before = s.in_conflict(u) as isize;
-            s.gamma[u * k + old] -= 1;
-            s.gamma[u * k + new] += 1;
-            change += s.in_conflict(u) as isize - before;
-        }
         s.color[v] = new;
-        change += s.in_conflict(v) as isize - was;
-        s.conflicting = (s.conflicting as isize + change) as usize;
+        for &u in &s.g.adj[v] {
+            // gamma[u][old] − 1: may become the new minimum
+            let g = &mut s.gamma[u * k + old];
+            *g -= 1;
+            if *g < s.low[u] {
+                (s.low[u], s.at_low[u]) = (*g, 1);
+            } else if *g == s.low[u] {
+                s.at_low[u] += 1;
+            }
+            // gamma[u][new] + 1: may leave the minimum
+            let g = &mut s.gamma[u * k + new];
+            *g += 1;
+            if *g - 1 == s.low[u] {
+                s.at_low[u] -= 1;
+                if s.at_low[u] == 0 {
+                    s.rescan_low(u);
+                }
+            }
+            if s.color[u] == old || s.color[u] == new {
+                s.sync(u);
+            }
+        }
+        s.sync(v);
     }
     #[inline]
     fn delta(&self, s: &Evaluated<Coloring<'g>>) -> Option<i64> {
@@ -225,8 +297,8 @@ impl<'g> DenseAttr<Coloring<'g>> for Recolor {
     }
 }
 
-/// Recolour a conflicting vertex; vertices that cannot beat the best candidate
-/// so far are skipped (their best possible delta is −gamma[v][colour]).
+/// Recolour a conflicting vertex. A vertex whose smallest gamma cannot beat
+/// the best candidate so far is skipped, and so is each colour that cannot.
 struct ConflictingVertices;
 
 impl<'g> Neighborhood<Coloring<'g>> for ConflictingVertices {
@@ -236,14 +308,18 @@ impl<'g> Neighborhood<Coloring<'g>> for ConflictingVertices {
         s: &Evaluated<Coloring<'g>>,
         vis: &mut V,
     ) -> ControlFlow<()> {
-        for v in 0..s.color.len() {
+        let k = s.k;
+        for &v in &s.list {
+            let v = v as usize;
             let own = s.gamma(v, s.color[v]);
-            if own == 0 || vis.bound().is_some_and(|b| -own >= b) {
+            if vis.can_skip(s.low[v] as i64 - own) {
                 continue;
             }
-            for c in 0..s.k {
-                if c != s.color[v] {
-                    vis.visit(Recolor { v, c }, s.gamma(v, c) - own)?;
+            let row = &s.gamma[v * k..][..k];
+            for (c, &g) in row.iter().enumerate() {
+                let delta = g as i64 - own;
+                if c != s.color[v] && !vis.can_skip(delta) {
+                    vis.visit(Recolor { v, c }, delta)?;
                 }
             }
         }
@@ -336,18 +412,24 @@ struct Settings {
     head: bool,
 }
 
+/// TabuCol (Hertz & de Werra; tenure as in Galinier & Hao): recolour a
+/// conflicting vertex, tenure 0..10 + 0.6 × conflicting vertices, random ties.
+fn tabucol<'g>() -> impl Search<Coloring<'g>> {
+    TabuSearch::new(
+        ConflictingVertices,
+        DynamicTabu::new(|s: &Coloring, rng| {
+            rng.random_range(0..10) + (0.6 * s.conflicting() as f64) as u64
+        }),
+    )
+    .random_ties()
+}
+
 /// One HEA run for k colours from seed `seed`. Returns a legal colouring if found.
 fn hea(g: &Graph, k: usize, seed: u64, cancel: &Cancel, set: &Settings) -> Option<Vec<usize>> {
     let n = g.n();
     let mut start = Coloring::new(g, k, vec![0; n]);
     start.randomize(&mut DefaultRng::seed_from_u64(seed));
-    let tabucol = TabuSearch::new(
-        ConflictingVertices,
-        DynamicTabu::new(|s: &Coloring, rng| {
-            rng.random_range(0..10) + (0.6 * s.conflicting as f64) as u64
-        }),
-    )
-    .random_ties();
+    let tabucol = tabucol();
     let mut st = State::new(start, seed);
     let memetic = Memetic::new(
         tabucol,
@@ -389,6 +471,7 @@ fn main() {
     let mut args = Args::from_env();
     let first_k: Option<usize> = args.value("--k");
     let stop_at: Option<usize> = args.value("--stop-at");
+    let bench: Option<u64> = args.value("--bench");
     let mut set = Settings {
         generations: args.value("--generations").unwrap_or(2000),
         iters: 0, // set below: 10, or 60 for --head
@@ -425,6 +508,26 @@ fn main() {
         set.iters,
         set.runs
     );
+    if let Some(iters) = bench {
+        // plain TabuCol from a random colouring: iterations per second
+        let k = first_k.unwrap_or(greedy_k - 1);
+        let mut start = Coloring::new(&g, k, vec![0; g.n()]);
+        start.randomize(&mut DefaultRng::seed_from_u64(1));
+        let mut st = State::new(start, 1);
+        let t = Instant::now();
+        tabucol()
+            .runner(&mut st)
+            .until(MaxIterations::new(iters).or(Target::new(0)))
+            .run();
+        let secs = t.elapsed().as_secs_f64();
+        println!(
+            "  TabuCol, {k} colours: {} iterations in {secs:.2} s ({:.0} it/s), best {} conflicts",
+            st.iteration(),
+            st.iteration() as f64 / secs,
+            st.global_best().cost()
+        );
+        return;
+    }
     let t0 = Instant::now();
     let mut k = first_k.unwrap_or(greedy_k - 1);
     let mut best = greedy_k;
@@ -495,8 +598,14 @@ mod tests {
                 s.apply(&m);
             }
             let fresh = Coloring::new(&g, 5, s.color.clone());
-            assert_eq!(s.conflicting, fresh.conflicting);
             assert_eq!(s.gamma, fresh.gamma);
+            assert_eq!((&s.low, &s.at_low), (&fresh.low, &fresh.at_low));
+            let mut listed: Vec<u32> = s.list.clone();
+            listed.sort_unstable();
+            assert_eq!(listed, fresh.list); // fresh lists in vertex order
+            assert!(listed
+                .iter()
+                .all(|&v| s.list[s.pos[v as usize] as usize] == v));
             assert_eq!(s.cost(), s.evaluate());
         }
         assert!(check::deltas(&mut ConflictingVertices, &s).is_empty());

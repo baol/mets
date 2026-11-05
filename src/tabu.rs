@@ -296,6 +296,14 @@ impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
         // with random ties, moves equal to the bound can still be chosen
         self.ties.is_none().then_some(self.bound)
     }
+    #[inline]
+    fn can_skip(&self, lower: S::Cost) -> bool {
+        if self.ties.is_some() {
+            self.best.is_some() && lower > self.bound
+        } else {
+            lower >= self.bound
+        }
+    }
 }
 
 impl<S, R, N, T, A> Search<S, R> for TabuSearch<N, T, A>

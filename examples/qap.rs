@@ -74,6 +74,13 @@ impl<M, Co, V: Visitor<M, Co>> Visitor<M, Co> for CountingVisitor<'_, V> {
     fn bound(&self) -> Option<Co> {
         self.inner.bound()
     }
+    #[inline]
+    fn can_skip(&self, lower: Co) -> bool
+    where
+        Co: PartialOrd,
+    {
+        self.inner.can_skip(lower)
+    }
 }
 
 impl<S: Model, N: Neighborhood<S>> Neighborhood<S> for Counted<N> {

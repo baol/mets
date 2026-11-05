@@ -142,7 +142,8 @@ first-class support, so the Rust API makes them composable (§3.9).
    indirect call per iteration.
 5. **Neighborhoods are generators.** They are never stored as lists. They push
    `(move, delta)` pairs into a visitor. The visitor can stop them early and
-   tells them which deltas still matter (`bound()`), so they can prune. Plain
+   tells them which deltas still matter (`bound()`, `can_skip(lower)`), so
+   they can prune. Plain
    iterators are accepted too, for simple cases (§3.4).
 6. **Algorithms are small steppable state machines.** A new metaheuristic is
    one `step` function. Algorithms nest, so ILS, iterated tabu search and
@@ -413,7 +414,7 @@ For debugging and tests, `collect_moves(&mut n, &s) -> Vec<(M, C)>` returns
 the moves of any `Neighborhood` with their deltas. The visitor remains the
 primary interface for two reasons. Nested loops are easier to write than
 nested iterator adapters once there are conditions. And only the visitor
-exposes `bound()`, which an iterator cannot see.
+exposes `bound()` and `can_skip()`, which an iterator cannot see.
 
 The neighborhood, not the algorithm, produces the delta. That is what makes the
 large-neighborhood tricks expressible:
@@ -423,10 +424,14 @@ large-neighborhood tricks expressible:
   O(n²) instead of O(n³). `examples/vcp.rs` keeps the TabuCol γ table.
 * **Candidate lists / restricted neighborhoods.** VCP only generates recolourings
   of conflicting vertices.
-* **Pruning with `bound()`.** VCP skips a vertex entirely when its best
-  possible delta (−γ[v][colour(v)]) cannot beat the best candidate so far.
-  Partial evaluations or lower bounds plug in the same way. Ignoring `bound()`
-  is always correct.
+* **Pruning with `can_skip(lower)`.** A neighborhood that knows a lower
+  bound on the deltas of a group of moves asks the visitor whether the
+  group can still matter. VCP skips a vertex when its best possible delta
+  (−γ[v][colour(v)]) cannot beat the best candidate so far; `coloring.rs`
+  keeps each vertex's smallest γ, a much tighter bound. The question, not a
+  raw `bound()`, is what lets a visitor with random tie-breaking (which may
+  still take a move *equal* to the best) prune too: it answers `lower > best`
+  instead of `lower >= best`. Ignoring both is always correct.
 * **Sampling.** `Sampler` gives O(1) random moves for SA/LAHC/RRT. The
   `Sampled::new(sampler, k)` adapter turns any sampler into a "k random moves"
   neighborhood (METSlib's `swap_neighborhood(rng, k)`), so tabu search can run
