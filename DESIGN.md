@@ -1060,6 +1060,20 @@ independent runs on 4 threads, best of them; times are wall-clock.
   known over 5 seeds, uniform 43.6 s mean (45.4 median), cohesive 57.9 s
   (53.2). No gain with `ma`'s first-improvement descent; Drezner pairs it
   with a tabu search, which `memetic` and `qap_gpu` use.
+* tai50a reaches its best-known value, 4,938,796, with `memetic` (iterated
+  robust tabu, population 10, 4 runs on 4 threads) in 756 s: the first tie
+  on the random "a" family. Directed perturbation (`perm::DirectedPerturbation`,
+  Benlic & Hao's breakout local search, `--perturbation directed`) did not
+  help in this budget: tai50a 4,941,410 in 15 minutes; tai60a 7,217,850
+  (0.16%) with either perturbation. One run per arm.
+* tho150 reaches its best-known value, 8,133,398, with `qap_gpu`
+  (population 112, 200n robust tabu iterations per child, cohesive
+  crossover, symmetric kernel, delta matrix in shared memory) on an RTX 3060
+  in 49 minutes. The best CPU result before was 8,133,702.
+* Exhaustive k-opt polish (`qap_gpu --kopt K`, `--polish-from`): on a
+  tho150 permutation at 8,141,304, 640 groups of 7 close positions held no
+  improving rearrangement (CPU). Tabu solutions are 7-opt optimal on such
+  groups; the GPU at k = 9 searches far more.
 * Islands (`--migrate-every G`, `parallel::islands`): 4 islands against 4
   independent `ma` runs, wall time to the best-known value, 5 trials each:
 

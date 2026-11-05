@@ -31,9 +31,9 @@ Current position (sandbox, 4 cores, plus the user's RTX 3060):
 
 | problem | instance | ours | best known | notes |
 |---|---|---|---|---|
-| QAP | tho150 | 8,133,702 | 8,133,398 | 0.004%; structured (grid distances) |
+| QAP | tho150 | 8,133,398 (tie, GPU, 49 min) | 8,133,398 | structured (grid distances) |
 | QAP | tai100a | 21,118,120 | 21,052,466 (file; literature lower) | random "a" family |
-| QAP | tai50a / tai80a | 4,941,410 / — | 4,938,796 / 13,499,184 | 0.05% / 0.9% |
+| QAP | tai50a / tai80a | 4,938,796 (tie) / — | 4,938,796 / 13,499,184 | tie / 0.9% |
 | QAP | 12 open instances | tie | tie | tai80b, sko81–100f, wil50/100, tai150b |
 | colouring | DSJC500.5 | 48 (47 reached 1 conflict on GPU) | 47 | 47 is believed optimal; 46 is not a target |
 | colouring | large DIMACS | not attempted | moved in the last decade | the realistic colouring frontier |
@@ -304,7 +304,12 @@ value on sko100a (uniform: ~25 min for the 4-run long run), and the best
 value on tho150 in 1 hour. Then on the GPU (`qap_gpu --crossover cohesive`,
 after Q3), tho150 for several hours with `--run-to-end`.
 
-## Q2. QAP: directed perturbation (breakout local search)
+## Q2. QAP: directed perturbation (breakout local search) (implemented)
+
+Implemented. Measurement, `memetic`, 15 minutes per arm: tai50a random
+4,938,796 (= best known) in 756 s, directed 4,941,410; tai60a 7,217,850
+with both. No gain in this budget; one run per arm.
+
 
 **Why.** On the random tai-a family (0.05–0.9% off), Benlic & Hao's BLS
 (2013) matched the best knowns with far less compute than plain robust
