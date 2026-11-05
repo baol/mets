@@ -1012,10 +1012,25 @@ independent runs on 4 threads, best of them; times are wall-clock.
   shorter acceptance histories were worse at the same time. This matches the
   literature, where tabu search on swaps is the strongest local method for
   the QAP.
-* Long runs (4 runs × 2000 children, memetic with Hamming-distance diversity,
-  `--run-to-end`) reach the best-known value exactly on three open
-  instances that the 200-restart table missed: `tai80b` 818,415,043 (24 min),
-  `sko81` 90,998 (16 min), `sko90` 115,534 (18 min). Ties, not records.
+* Long runs to the end (4 runs on 4 threads; `memetic` with 2,000 children
+  per run, or `ma` with 10⁶) reach the best-known value **exactly** on 11
+  open instances that the 200-restart table missed, and never go below it:
+
+  | instance | best known | method, wall time |
+  |---|---|---|
+  | tai80b | 818,415,043 | memetic, 24 min |
+  | sko81 | 90,998 | memetic, 16 min |
+  | sko90 | 115,534 | memetic, 18 min |
+  | wil50 | 48,816 | memetic, 5 min |
+  | sko100a | 152,002 | memetic, 25 min |
+  | sko100b | 153,890 | memetic, 25 min |
+  | sko100c | 147,862 | memetic, 25 min |
+  | sko100d | 149,576 | memetic, 23 min |
+  | sko100e | 149,150 | memetic, 25 min |
+  | sko100f | 149,036 | ma, 28 min |
+  | wil100 | 273,038 | ma, 27 min |
+
+  Ties, not records: these values have stood for decades.
 * Time to the best-known value, one core per run, 5 seeds, memetic search
   stopping at the target (`--runs 1 --jobs 1 --first-seed s`), against
   Merz & Freisleben's memetic algorithm (CEC 1999, Table 2: one core of a
