@@ -1068,8 +1068,9 @@ independent runs on 4 threads, best of them; times are wall-clock.
   (0.16%) with either perturbation. One run per arm.
 * tho150 reaches its best-known value, 8,133,398, with `qap_gpu`
   (population 112, 200n robust tabu iterations per child, cohesive
-  crossover, symmetric kernel, delta matrix in shared memory) on an RTX 3060
-  in 49 minutes. The best CPU result before was 8,133,702.
+  crossover, symmetric kernel, delta matrix in shared memory: 93 KB per
+  block, 1 block per SM, 28 at a time; build 70d0fcf) on an RTX 3060 in 49
+  minutes. The best CPU result before was 8,133,702.
 * Exhaustive k-opt polish (`qap_gpu --kopt K`, `--polish-from`): on a
   tho150 permutation at 8,141,304, 640 groups of 7 close positions held no
   improving rearrangement (CPU). Tabu solutions are 7-opt optimal on such
