@@ -303,7 +303,10 @@ two are separated on the CPU, without the GPU:
   baseline ties could not be recounted, which §6.6 requires.
 * Run: `memetic`, single-threaded, 1 hour, seeds 1–5, aspiration 5n²
   (the Q9 baseline, 2/4 so far; its seed 5 completes it) against 20n²
-  and off (1000). Then `restarts` (one trajectory at a time) at 5n² and
+  and off (1000). The flags, the saved `.best` and the runner
+  (`scripts/q10-cpu.sh`, `q10-summary.py`) are done (50efeb5, 1168797);
+  the runner targets the owner's machine with one core left for the GPU
+  host, which is fine: the arms compare within one machine. Then `restarts` (one trajectory at a time) at 5n² and
   20n², same budget.
 * Decision: if 20n² lifts the single-threaded memetic from 2/5-ish to
   5/5 with a median under 600 s, the explanation is wrong and the longer
@@ -648,6 +651,48 @@ pr05 curve of Fig. 2 at N = 8 on the user's machine. (3) X instances,
 n ≤ 500, against the CVRPLIB best known and the published HGS gaps:
 expect to lose; record by how much and where.
 
+*Status (builds 5abacba–e6ceac1; `reports/2026-11-06-p7-steps-1-7.md`,
+`reports/2026-11-06-p7-its-first-results.md`).* Steps 1–8 done except
+GENI: reader, `Routes` with penalties inside, `Relocate`, attribute tabu,
+attribute aspiration, frequency score through `TabuSearch::with_score`,
+the per-iteration bookkeeping through `Adjusting`, the phase loop, the
+cluster perturbation, the 1 − (λ/η)² acceptance, `NAME.sol` output, and
+`scripts/verify_vrp.py` in Python (a second language, independent by
+construction, which is better than the plan's Rust verifier). All 212
+received solutions and the 34 CMT/Golden reference solutions recount in
+both programs; CMT and Golden were fetched from GitHub mirrors, so the
+owner need not supply them. The parallel scheme (step 8's threads,
+barrier, ⌊√p⌋ rule, crossover) is not built yet.
+
+First results, η = 10⁵, one seed per instance (exploratory by §6), route
+refinement by 2-opt and Or-opt:
+
+| set | ours | paper, Table 9, ITS/1 at η = 10⁵ |
+|---|---|---|
+| CMT 1–14 | 0.44% (7 best knowns) | 0.60% |
+| Golden 1–20 | 2.10% | 1.30% |
+
+Our run is 20× faster per iteration than the paper's (no GENI), so time
+is not comparable; iterations are the unit, as planned. Decisions:
+1. CMT: lock the acceptance now with 10 seeds at η = 10⁵ (about 15 CPU
+   minutes) and 10 seeds at 10⁶; passes if the means are at or below
+   0.60% and 0.27%. Then the DESIGN entry for the CVRP and the two
+   library additions (§3 for the API, §4 for the numbers).
+2. Golden, before GENI, two cheap diagnostics: (a) η = 10⁶, one seed
+   (the paper's mean falls from 1.30% to 0.79%; if ours falls by a
+   similar ratio, the deficit is a constant factor of the neighbourhood,
+   which is GENI's; if it does not fall, the phase dynamics are wrong
+   somewhere and GENI would hide it); (b) the fleet: the default is the
+   reference solution's routes plus one spare vehicle, a choice the paper
+   does not state in the pages read; run Golden 1–8 with `--vehicles` at
+   the reference count, since a spare vehicle changes what the duration
+   limit costs. Both together are under 3 CPU-hours.
+3. GENI (types I and II, neighbourhood q as the paper) only if (2a) shows
+   the constant-factor pattern; then Golden with 10 seeds at 10⁵ is the
+   acceptance run (at or below 1.30%).
+4. The parallel scheme follows the acceptance, and is measured on pr05 as
+   the paper does (Fig. 2) before any GPU work.
+
 **Research direction: Fig. 2 at N = 1,000.** The parallel scheme is the
 `qap_gpu` pattern exactly: one block per process, a phase of tabu
 iterations as the batch, acceptance, ranking and crossover on the host.
@@ -682,7 +727,12 @@ show the GPU memetic pattern transfers to a non-QAP problem.
 * `TabuSearch::with_score` (selection score distinct from the applied
   delta: frequency diversification, guided local search) and `Adjusting`
   (a per-step hook with `&mut State`: self-adjusting penalties, reactive
-  tenure), both from P7 and both general.
+  tenure), both from P7 and both general. Done (4df6a55): a `Score`
+  trait whose `IS_DELTA` turns off neighbourhood pruning when a score is
+  in use, the real delta still applied; `Adjusting { inner, adjust }`
+  with the caveat that bests recorded under old penalty weights keep
+  their old costs, so the example tracks its best feasible solution
+  itself. Reviewed; nothing to change.
 * A `results/` convention: every reported number has a log, a trace and a
   solution file under `results/<problem>/<instance>/`, and a `verify`
   example per problem that recomputes a cost from instance and solution
@@ -729,16 +779,11 @@ Sandbox queue while the GPU runs, in order:
    line, the 24-bit move index path, a few generations with `--trace`),
    and the two k values confirmed from a source the owner provides (the
    sandbox cannot reach the literature). No GPU run before both are done.
-3. P7 steps 1 and 7: the `.vrp` reader with the three distance
-   conventions (EUC_2D rounded for X/XL/XTW, EUC_2D real for CMT/Golden,
-   EXPLICIT for the DIMACS set), the `Routes` model with its penalties,
-   and `verify_vrp` checked against the `.sol` files already in the
-   sandbox (XL, XTW, DIMACS: every `.sol` must recount to its stated
-   cost). The CMT and Golden sets are not in the sandbox and are the
-   acceptance test of the port: the owner supplies them in `.vrp`/`.sol`
-   form before step 8.
-4. P7 library additions, unit-tested without data: `TabuSearch::with_score`
-   and `Adjusting` (§5).
+3. P7: steps 1–8 and the library additions are done. Next, in order:
+   the CMT acceptance with 10 seeds at 10⁵ and 10⁶; the two Golden
+   diagnostics (η = 10⁶, fleet without the spare vehicle); GENI if the
+   diagnostics say so; the DESIGN entry.
+4. Q10 runs on the owner's machine; its report is read like the others.
 
 1. Q5 (GPU ablation of cohesive crossover) and A3 (pending GPU runs):
    both are mostly GPU time, and both settle claims already in DESIGN.
