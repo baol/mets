@@ -619,6 +619,31 @@ is reported as "exploratory" and does not change a default.
 
 ## 7. Order of work
 
+GPU queue (one run at a time on the RTX 3060): Q6 tai50a, B at 20n² and
+arms A, C at 10n² (running) → A2 calibration, DSJC1000.5 and
+flat1000_76_0 at k = best known, 4 h each → Q7 tai256c, cohesive, 4 h →
+Q6 tai60a/tai80a with the arms that tied tai50a → Q5.
+
+Sandbox queue while the GPU runs, in order:
+1. Q9: finish the tai50a run (5 seeds per arm, single-threaded), verify
+   every tie with `scripts/verify_qap.py`, report, and apply the decision
+   rule.
+2. A2 preparation: `coloring_gpu --cpu` host-loop checks on DSJC1000.5 at
+   k = 82 and flat1000_76_0 at k = 81 (memory and occupancy in the start
+   line, the 24-bit move index path, a few generations with `--trace`),
+   and the two k values confirmed from a source the owner provides (the
+   sandbox cannot reach the literature). No GPU run before both are done.
+3. P7 steps 1 and 7: the `.vrp` reader with the three distance
+   conventions (EUC_2D rounded for X/XL/XTW, EUC_2D real for CMT/Golden,
+   EXPLICIT for the DIMACS set), the `Routes` model with its penalties,
+   and `verify_vrp` checked against the `.sol` files already in the
+   sandbox (XL, XTW, DIMACS: every `.sol` must recount to its stated
+   cost). The CMT and Golden sets are not in the sandbox and are the
+   acceptance test of the port: the owner supplies them in `.vrp`/`.sol`
+   form before step 8.
+4. P7 library additions, unit-tested without data: `TabuSearch::with_score`
+   and `Adjusting` (§5).
+
 1. Q5 (GPU ablation of cohesive crossover) and A3 (pending GPU runs):
    both are mostly GPU time, and both settle claims already in DESIGN.
 2. Q7 tai256c: first use of the global-memory kernel, realistic beat.
