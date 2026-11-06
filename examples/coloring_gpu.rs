@@ -13,7 +13,8 @@
 //!   --iters L        TabuCol iterations per child, in units of n (default 60)
 //!   --max-seconds T  give up after T seconds (default 3600)
 //!   --seed S         (default 1)
-//!   --threads T      GPU threads per block (default 128)
+//!   --threads T      GPU threads per block (default: 1024 when the tables in shared
+//!                    memory leave room for one block per SM, else 128)
 //!   --table T        conflict table: auto | 8 | 16 bits (default auto: 16 bits in shared
 //!                    memory if they fit, else 8 bits if those fit, else 16 in global memory)
 //!   --cpu            improve on the CPU threads instead of the GPU
@@ -311,12 +312,11 @@ extern "C" __global__ void tabucol8(
             g: &Graph,
             k: usize,
             p: usize,
-            threads: u32,
+            threads: Option<u32>,
             table: Table,
         ) -> Result<Self, Error> {
             let n = g.n();
             assert!(n * k < 1 << 24, "move index must fit 24 bits");
-            assert!(threads.is_multiple_of(32), "whole warps");
             let ctx = cudarc::driver::CudaContext::new(0)?;
             let device = ctx.name()?;
             let stream = ctx.default_stream();
@@ -362,11 +362,25 @@ extern "C" __global__ void tabucol8(
                 0
             };
             let global = |len: usize| if shared_bytes == 0 { len } else { 1 };
-            let blocks_per_sm = f.occupancy_max_active_blocks_per_multiprocessor(
-                threads,
-                shared_bytes as usize,
-                None,
-            )?;
+            let occupancy = |t: u32| {
+                f.occupancy_max_active_blocks_per_multiprocessor(t, shared_bytes as usize, None)
+            };
+            // with room for one block per SM, the block must be as wide as the
+            // SM holds to keep it busy (A2.6: 1,024 threads ran 8× faster than
+            // 128 with the 8-bit table on DSJC1000.5)
+            let threads = match threads {
+                Some(t) => t,
+                None if shared_bytes > 0 && occupancy(128)? == 1 => {
+                    let mut t = 1024;
+                    while t > 128 && occupancy(t)? == 0 {
+                        t /= 2;
+                    }
+                    t
+                }
+                None => 128,
+            };
+            assert!(threads.is_multiple_of(32), "whole warps");
+            let blocks_per_sm = occupancy(threads)?;
             let sms = ctx.attribute(
                 cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
             )?;
@@ -572,7 +586,7 @@ fn main() {
     let vss_rounds: usize = args.value("--vss-rounds").unwrap_or(0);
     let vss_iters: u64 = args.value("--vss-iters").unwrap_or(100);
     let seed: u64 = args.value("--seed").unwrap_or(1);
-    let threads: u32 = args.value("--threads").unwrap_or(128);
+    let threads: Option<u32> = args.value("--threads");
     let table = match args.value::<String>("--table").as_deref() {
         None | Some("auto") => Table::Auto,
         Some("8") => Table::Bits8,
@@ -603,9 +617,10 @@ fn main() {
         gpu_improver(&g, k, p, threads, table)
     };
     trace.line(format_args!(
-        "start build={} file={file} n={n} edges={} k={k} pairs={pairs} iters={iters} threads={threads} seed={seed} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
+        "start build={} file={file} n={n} edges={} k={k} pairs={pairs} iters={iters} threads={} seed={seed} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
         env!("METS_GIT_HASH"),
         g.edges,
+        threads.map_or("auto".to_string(), |t| t.to_string()),
         improver.name(),
         setup.elapsed().as_secs_f64(),
     ));
@@ -776,13 +791,19 @@ fn gpu_improver<'g>(
     g: &'g Graph,
     k: usize,
     p: usize,
-    threads: u32,
+    threads: Option<u32>,
     table: Table,
 ) -> Box<dyn Improver + 'g> {
     Box::new(gpu::GpuTabuCol::new(g, k, p, threads, table).unwrap_or_else(|e| panic!("GPU: {e}")))
 }
 
 #[cfg(not(feature = "gpu"))]
-fn gpu_improver<'g>(_: &'g Graph, _: usize, _: usize, _: u32, _: Table) -> Box<dyn Improver + 'g> {
+fn gpu_improver<'g>(
+    _: &'g Graph,
+    _: usize,
+    _: usize,
+    _: Option<u32>,
+    _: Table,
+) -> Box<dyn Improver + 'g> {
     panic!("built without the GPU: rebuild with --features gpu, or run with --cpu")
 }

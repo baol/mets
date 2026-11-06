@@ -1284,6 +1284,25 @@ k = 48, a batch of 128 runs × 5,000 iterations:
 10 M iterations/s is about 30 of the 4-core sandbox's cores; a legal
 48-colouring took 12.9 s. Every recount matched across all test runs.
 
+On DSJC1000.5 at k = 82 the 16-bit table (163 KB) does not fit the 99 KB
+of shared memory a block may use. The 8-bit table (84 KB, counters
+saturating at 255, which fails the run) fits, but leaves room for one
+block per SM (`reports/2026-11-06-a2-smoke-test.md`, 10 minutes each):
+
+| tables, threads per block | blocks resident | per batch of 224 × 60,000 iterations | TabuCol it/s |
+|---|---|---|---|
+| 16-bit in global memory, 128 | 9 per SM | 11.3 s | 1.2 M |
+| 8-bit in shared memory, 128 | 1 per SM | 47 s | 0.27 M |
+| 8-bit in shared memory, 512 | 1 per SM | 10.6 → 8.1 s | 1.27 → 1.50 M |
+| 8-bit in shared memory, 1,024 | 1 per SM | 7.8 → 5.6 s | 1.73 → 2.19 M |
+
+With one block per SM, the block must be as wide as the SM holds. A
+shared table pays only with enough warps behind it, not merely while it
+leaves two blocks per SM. So `--threads` now follows the table: 1,024
+when shared memory leaves room for one block per SM, 128 otherwise.
+(Batches get faster during a run as the conflict lists shrink, so the
+rates are bounds.)
+
 ### Vehicle routing (CMT and Golden)
 
 `examples/cvrp.rs` (§3.16) on the 14 CMT and 20 Golden instances, with
