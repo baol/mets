@@ -14,6 +14,8 @@
 //!   --max-seconds T  give up after T seconds (default 3600)
 //!   --seed S         (default 1)
 //!   --threads T      GPU threads per block (default 128)
+//!   --table T        conflict table: auto | 8 | 16 bits (default auto: 16 bits in shared
+//!                    memory if they fit, else 8 bits if those fit, else 16 in global memory)
 //!   --cpu            improve on the CPU threads instead of the GPU
 //! A legal colouring is verified and saved as NAME.K.sol ("vertex colour", 1-based),
 //! or the first free NAME.K.2.sol, … if that file exists.
@@ -53,6 +55,17 @@ use mets::rand::{Rng, SeedableRng};
 use mets::*;
 use std::io::Write;
 use std::time::Instant;
+
+/// The conflict table's counters on the GPU: 16 bits, or 8 bits (saturating
+/// at 255, with a warning) so that larger graphs fit shared memory.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Table {
+    /// 16 bits in shared memory if they fit, else 8 bits if those fit, else
+    /// 16 bits in global memory.
+    Auto,
+    Bits8,
+    Bits16,
+}
 
 /// Improves a batch of k-colourings in place: each becomes the best colouring
 /// its TabuCol run found. Returns their conflicting edges.
@@ -102,7 +115,7 @@ impl Improver for CpuTabuCol<'_> {
 
 #[cfg(feature = "gpu")]
 mod gpu {
-    use super::{Graph, Improver};
+    use super::{Graph, Improver, Table};
     use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
     use std::sync::Arc;
 
@@ -117,21 +130,33 @@ __device__ __forceinline__ unsigned int xs(unsigned int &s) {
     s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s;
 }
 
-extern "C" __global__ void tabucol(
+// one more neighbour of a colour; an 8-bit counter saturates at 255 and
+// raises the block's overflow flag (the host warns, the recount checks)
+template <typename G>
+__device__ __forceinline__ void bump(G* x, int* overflow) {
+    if (sizeof(G) == 1 && *x == (G)255) *overflow = 1;
+    else (*x)++;
+}
+
+template <typename G>
+__device__ __forceinline__ void tabucol_body(
     const int* __restrict__ start, const int* __restrict__ adj, int n, int k,
-    int* best_color, unsigned char* cur_color, unsigned short* gamma, unsigned short* clist,
-    int* tabu, long long* out_cost, long long iters, unsigned int seed, int use_shared)
+    int* best_color, unsigned char* cur_color, G* gamma, unsigned short* clist,
+    int* tabu, long long* out_cost, long long iters, unsigned int seed, int use_shared,
+    int* overflow_all)
 {
     const int b = blockIdx.x, t = threadIdx.x, T = blockDim.x;
     const size_t nk = (size_t)n * k;
-    // the conflict table (16 bits), the list of conflicting vertices (16 bits)
-    // and the current colouring (8 bits) live in shared memory when they fit
-    // (2nk + 3n bytes), else in global memory
+    // the conflict table (8 or 16 bits), the list of conflicting vertices
+    // (16 bits) and the current colouring (8 bits) live in shared memory when
+    // they fit, else in global memory; the table is padded to 8 bytes
     extern __shared__ __align__(8) unsigned char smem[];
+    const size_t tbytes = (sizeof(G) * nk + 7) & ~(size_t)7;
     int* best = best_color + (size_t)b * n;
-    unsigned short* g = use_shared ? (unsigned short*)smem : gamma + (size_t)b * nk;
-    unsigned short* list = use_shared ? (unsigned short*)(smem + 2 * nk) : clist + (size_t)b * n;
-    unsigned char* col = use_shared ? smem + 2 * nk + 2 * (size_t)n : cur_color + (size_t)b * n;
+    int* overflow = overflow_all + b;
+    G* g = use_shared ? (G*)smem : gamma + (size_t)b * nk;
+    unsigned short* list = use_shared ? (unsigned short*)(smem + tbytes) : clist + (size_t)b * n;
+    unsigned char* col = use_shared ? smem + tbytes + 2 * (size_t)n : cur_color + (size_t)b * n;
     int* tb = tabu + (size_t)b * nk;
     __shared__ u64 sel;
     __shared__ int f, bestf, nconf, nlist;
@@ -145,7 +170,7 @@ extern "C" __global__ void tabucol(
     if (t == 0) { f = 0; nconf = 0; }
     __syncthreads();
     for (int v = t; v < n; v += T)
-        for (int e = start[v]; e < start[v + 1]; e++) g[(size_t)v * k + col[adj[e]]]++;
+        for (int e = start[v]; e < start[v + 1]; e++) bump(&g[(size_t)v * k + col[adj[e]]], overflow);
     __syncthreads();
     {
         int lf = 0, lc = 0;
@@ -175,7 +200,7 @@ extern "C" __global__ void tabucol(
             const int v = list[q / k], c = q % k;
             const int cv = col[v];
             if (c == cv) continue;
-            const unsigned short* gv = g + (size_t)v * k;
+            const G* gv = g + (size_t)v * k;
             const int d = (int)gv[c] - (int)gv[cv];
             if (d > local_d) continue;
             if (tb[(size_t)v * k + c] < it || fv + d < bf) {  // not tabu, or aspired
@@ -202,15 +227,15 @@ extern "C" __global__ void tabucol(
         int lc = 0;
         for (int e = start[v] + t; e < start[v + 1]; e += T) {
             const int u = adj[e], cu = col[u];
-            unsigned short* gu = g + (size_t)u * k;
+            G* gu = g + (size_t)u * k;
             if (cu == old) lc -= (gu[old] == 1);
             else if (cu == c) lc += (gu[c] == 0);
-            gu[old]--; gu[c]++;
+            gu[old]--; bump(&gu[c], overflow);
         }
         if (lc) atomicAdd(&nconf, lc);
         __syncthreads();
         if (t == 0) {
-            const unsigned short* gv = g + (size_t)v * k;
+            const G* gv = g + (size_t)v * k;
             nconf += (gv[c] > 0) - (gv[old] > 0);
             col[v] = (unsigned char)c;
             f += d;
@@ -228,6 +253,26 @@ extern "C" __global__ void tabucol(
     }
     if (t == 0) out_cost[b] = bestf;
 }
+
+extern "C" __global__ void tabucol16(
+    const int* __restrict__ start, const int* __restrict__ adj, int n, int k,
+    int* best_color, unsigned char* cur_color, unsigned short* gamma, unsigned short* clist,
+    int* tabu, long long* out_cost, long long iters, unsigned int seed, int use_shared,
+    int* overflow)
+{
+    tabucol_body<unsigned short>(start, adj, n, k, best_color, cur_color, gamma, clist, tabu,
+                                 out_cost, iters, seed, use_shared, overflow);
+}
+
+extern "C" __global__ void tabucol8(
+    const int* __restrict__ start, const int* __restrict__ adj, int n, int k,
+    int* best_color, unsigned char* cur_color, unsigned char* gamma, unsigned short* clist,
+    int* tabu, long long* out_cost, long long iters, unsigned int seed, int use_shared,
+    int* overflow)
+{
+    tabucol_body<unsigned char>(start, adj, n, k, best_color, cur_color, gamma, clist, tabu,
+                                out_cost, iters, seed, use_shared, overflow);
+}
 "#;
 
     pub struct GpuTabuCol {
@@ -239,6 +284,11 @@ extern "C" __global__ void tabucol(
         cur: CudaSlice<u8>,
         list: CudaSlice<u16>,
         gamma: CudaSlice<u16>,
+        /// Placeholder for the 8-bit kernel's (unused) global table argument.
+        gamma8: CudaSlice<u8>,
+        overflow: CudaSlice<i32>,
+        /// 8-bit conflict table (`tabucol8`) instead of 16-bit.
+        eight: bool,
         tabu: CudaSlice<i32>,
         cost: CudaSlice<i64>,
         n: usize,
@@ -257,7 +307,13 @@ extern "C" __global__ void tabucol(
 
     impl GpuTabuCol {
         /// Buffers for a batch of `p` k-colourings of `g` on GPU 0.
-        pub fn new(g: &Graph, k: usize, p: usize, threads: u32) -> Result<Self, Error> {
+        pub fn new(
+            g: &Graph,
+            k: usize,
+            p: usize,
+            threads: u32,
+            table: Table,
+        ) -> Result<Self, Error> {
             let n = g.n();
             assert!(n * k < 1 << 24, "move index must fit 24 bits");
             assert!(threads.is_multiple_of(32), "whole warps");
@@ -265,7 +321,7 @@ extern "C" __global__ void tabucol(
             let device = ctx.name()?;
             let stream = ctx.default_stream();
             let ptx = cudarc::nvrtc::compile_ptx(KERNEL)?;
-            let f = ctx.load_module(ptx)?.load_function("tabucol")?;
+            let module = ctx.load_module(ptx)?;
             assert!(
                 g.adj.iter().all(|nb| nb.len() < 1 << 16),
                 "16-bit conflict counts"
@@ -275,10 +331,25 @@ extern "C" __global__ void tabucol(
                 k < 256 && n < 1 << 16,
                 "8-bit colours and 16-bit vertex numbers"
             );
-            let need = 2 * n * k + 3 * n;
+            // shared bytes with a 16- or an 8-bit table (padded to 8), the list and the colouring
+            let need16 = ((2 * n * k + 7) & !7) + 3 * n;
+            let need8 = ((n * k + 7) & !7) + 3 * n;
             let optin = ctx.attribute(
                 cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
             )? as usize;
+            let eight = match table {
+                Table::Bits16 => false,
+                Table::Bits8 => {
+                    assert!(
+                        need8 <= optin,
+                        "an 8-bit table needs {need8} bytes, the device allows {optin}"
+                    );
+                    true
+                }
+                Table::Auto => need16 > optin && need8 <= optin,
+            };
+            let f = module.load_function(if eight { "tabucol8" } else { "tabucol16" })?;
+            let need = if eight { need8 } else { need16 };
             let shared_bytes = if need <= optin {
                 if need > 48 * 1024 {
                     f.set_attribute(
@@ -312,6 +383,9 @@ extern "C" __global__ void tabucol(
                 cur: stream.alloc_zeros(global(p * n))?,
                 list: stream.alloc_zeros(global(p * n))?,
                 gamma: stream.alloc_zeros(global(p * n * k))?,
+                gamma8: stream.alloc_zeros(1)?,
+                overflow: stream.alloc_zeros(p)?,
+                eight,
                 tabu: stream.alloc_zeros(p * n * k)?,
                 cost: stream.alloc_zeros(p)?,
                 stream,
@@ -330,7 +404,8 @@ extern "C" __global__ void tabucol(
                     let bytes =
                         4 * p * n * k + 4 * p * n + 8 * p + 4 * (n + 1 + 2 * g.edges) + table;
                     format!(
-                        "{blocks_per_sm} blocks per SM × {sms} SMs, {} MB of device memory",
+                        "{}-bit conflict table, {blocks_per_sm} blocks per SM × {sms} SMs, {} MB of device memory",
+                        if eight { 8 } else { 16 },
                         bytes.div_ceil(1 << 20)
                     )
                 },
@@ -355,6 +430,13 @@ extern "C" __global__ void tabucol(
             self.stream.memcpy_htod(&self.host, &mut self.best)?;
             let (n32, k32, iters, seed) = (n as i32, self.k as i32, iters as i64, seed as u32);
             let use_shared = (self.shared_bytes > 0) as i32;
+            self.stream
+                .memcpy_htod(&vec![0i32; self.p], &mut self.overflow)?;
+            let cfg = LaunchConfig {
+                grid_dim: (self.p as u32, 1, 1),
+                block_dim: (self.threads, 1, 1),
+                shared_mem_bytes: self.shared_bytes,
+            };
             let mut launch = self.stream.launch_builder(&self.f);
             launch
                 .arg(&self.start)
@@ -362,20 +444,32 @@ extern "C" __global__ void tabucol(
                 .arg(&n32)
                 .arg(&k32)
                 .arg(&mut self.best)
-                .arg(&mut self.cur)
-                .arg(&mut self.gamma)
+                .arg(&mut self.cur);
+            if self.eight {
+                launch.arg(&mut self.gamma8);
+            } else {
+                launch.arg(&mut self.gamma);
+            }
+            launch
                 .arg(&mut self.list)
                 .arg(&mut self.tabu)
                 .arg(&mut self.cost)
                 .arg(&iters)
                 .arg(&seed)
-                .arg(&use_shared);
-            let cfg = LaunchConfig {
-                grid_dim: (self.p as u32, 1, 1),
-                block_dim: (self.threads, 1, 1),
-                shared_mem_bytes: self.shared_bytes,
-            };
+                .arg(&use_shared)
+                .arg(&mut self.overflow);
             unsafe { launch.launch(cfg) }?;
+            let saturated = self
+                .stream
+                .clone_dtoh(&self.overflow)?
+                .iter()
+                .filter(|&&o| o != 0)
+                .count();
+            if saturated > 0 {
+                eprintln!(
+                    "warning: the 8-bit conflict table saturated in {saturated} blocks this batch"
+                );
+            }
             self.stream.memcpy_dtoh(&self.best, &mut self.host)?;
             let costs = self.stream.clone_dtoh(&self.cost)?;
             for (i, col) in batch.iter_mut().enumerate() {
@@ -476,6 +570,12 @@ fn main() {
     let vss_iters: u64 = args.value("--vss-iters").unwrap_or(100);
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let threads: u32 = args.value("--threads").unwrap_or(128);
+    let table = match args.value::<String>("--table").as_deref() {
+        None | Some("auto") => Table::Auto,
+        Some("8") => Table::Bits8,
+        Some("16") => Table::Bits16,
+        Some(x) => panic!("--table auto|8|16, not {x:?}"),
+    };
     let trace_file: Option<String> = args.value("--trace");
     let mut trace = Trace(trace_file.map(|f| {
         std::fs::OpenOptions::new()
@@ -497,7 +597,7 @@ fn main() {
     let mut improver: Box<dyn Improver> = if cpu {
         Box::new(CpuTabuCol { g: &g, k, jobs })
     } else {
-        gpu_improver(&g, k, p, threads)
+        gpu_improver(&g, k, p, threads, table)
     };
     trace.line(format_args!(
         "start build={} file={file} n={n} edges={} k={k} pairs={pairs} iters={iters} threads={threads} seed={seed} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
@@ -669,11 +769,17 @@ fn main() {
 }
 
 #[cfg(feature = "gpu")]
-fn gpu_improver<'g>(g: &'g Graph, k: usize, p: usize, threads: u32) -> Box<dyn Improver + 'g> {
-    Box::new(gpu::GpuTabuCol::new(g, k, p, threads).unwrap_or_else(|e| panic!("GPU: {e}")))
+fn gpu_improver<'g>(
+    g: &'g Graph,
+    k: usize,
+    p: usize,
+    threads: u32,
+    table: Table,
+) -> Box<dyn Improver + 'g> {
+    Box::new(gpu::GpuTabuCol::new(g, k, p, threads, table).unwrap_or_else(|e| panic!("GPU: {e}")))
 }
 
 #[cfg(not(feature = "gpu"))]
-fn gpu_improver<'g>(_: &'g Graph, _: usize, _: usize, _: u32) -> Box<dyn Improver + 'g> {
+fn gpu_improver<'g>(_: &'g Graph, _: usize, _: usize, _: u32, _: Table) -> Box<dyn Improver + 'g> {
     panic!("built without the GPU: rebuild with --features gpu, or run with --cpu")
 }
