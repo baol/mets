@@ -35,3 +35,8 @@ pattern; the second is symmetric with a zero diagonal but is not a metric
 a proximity that is not a metric, for example ranking positions by the
 second matrix directly without the triangle test. Not changed: a decision
 for the plan's owner.
+
+Follow-up: `f0cfd2f` (owner) makes `Instance::proximity` accept such
+similarity matrices (ranking by decreasing value, over elements when it is
+the second matrix), so `--crossover cohesive` applies on tai256c from that
+build on.
