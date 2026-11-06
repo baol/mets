@@ -174,15 +174,29 @@ hypothesis holds at n = 50: B and C go on, A does not. (3) B and C at
 10n² are not separable with five seeds (C's max 438 s against B's 1,549 s
 is one seed).
 
+*Third stage (`reports/2026-11-06-q6-aspiration-40-off.md`, same setup,
+all 10 `.best` files recounted).*
+
+| aspiration | reached | time to best known by seed (s) | median, max |
+|---|---|---|---|
+| 40n² | 5/5 | 143, 503, 42, 1,300, 578 | 503 s, 1,300 s |
+| off (1000n²) | 5/5 | 140, 466, 39, 1,303, 598 | 466 s, 1,303 s |
+
+The sweep peaks at 20n² (median 35 s) and stops by its rule. 40n² and
+off are the same run to within a few seconds per seed: at that age the
+forced move almost never fires, because on n = 50 every assignment is
+revisited far more often than once per 100,000 iterations (the stamps
+persist across batches, so this is about the visit rate, not the batch
+length). So the long-term aspiration is a forced-diversification rate:
+frequent at 5n², rare at 20n², absent beyond, and a *little* of it is
+best on tai50a. Five seeds with wide spreads: 20n² is the setting to
+carry forward, not a proven optimum; tai60a will say whether it holds
+at n = 60.
+
 Decisions:
 * Aspiration 20n² for every tai-a arm from here; the GPU default stays
   Taillard's 5n² until a second instance agrees (§0 rule).
-* Next level on tai50a, arm B, same budget: 40n² and effectively off
-  (`ASPIRATIONS="40 1000"`: 1000n² is 2.5·10⁹ iterations, beyond a
-  30-minute run). If off is as good as 20n², the aspiration is redundant
-  with the population on tai-a and the arms on tai60a/tai80a run at off;
-  if off loses seeds, the sweep has found its optimum between 20n² and
-  40n² and the arms run at the better of the two.
+* The sweep is closed. Q10 (CPU) remains the test of why it helps.
 * tai60a: B and C at the settled aspiration, 5 seeds, 30 minutes; a reach
   count under 3/5 for both repeats at 60 minutes before any conclusion.
   tai80a: 60 minutes from the start. Arm A is not run on either.
@@ -303,7 +317,8 @@ two are separated on the CPU, without the GPU:
   baseline ties could not be recounted, which §6.6 requires.
 * Run: `memetic`, single-threaded, 1 hour, seeds 1–5, aspiration 5n²
   (the Q9 baseline, 2/4 so far; its seed 5 completes it) against 20n²
-  and off (1000). The flags, the saved `.best` and the runner
+  and off (1000). Partial (owner's machine, build e6ceac1): memetic at
+  5n², seed 2 ties in 1,547 s, recounted; the rest still running. The flags, the saved `.best` and the runner
   (`scripts/q10-cpu.sh`, `q10-summary.py`) are done (50efeb5, 1168797);
   the runner targets the owner's machine with one core left for the GPU
   host, which is fine: the arms compare within one machine. Then `restarts` (one trajectory at a time) at 5n² and
@@ -369,8 +384,22 @@ GPU and was 9× slower per batch on DSJC500.5. Directions:
    4-hour runs. If the rate is near the 1.2 M it/s of the first
    DSJC500.5 kernel, 4 hours is a few hundred generations and the runs
    are a floor, not a verdict.
+*Smoke test done (`reports/2026-11-06-a2-smoke-test.md`, build e6ceac1,
+10 minutes).* Global tables, 9 blocks per SM, 109 MB, 53 clean batches,
+1.2 M it/s: the rate of the first DSJC500.5 kernel, under the 3 M
+threshold, so the 4-hour runs wait for A2.6, which is implemented
+(6b589ea, `--table 8`). Next on the GPU: the same 10-minute smoke test
+with `--table 8`; the comparison is batch time at equal iterations and
+`mismatches=0`. Before it, one change: a batch in which any block's
+8-bit counter saturated must *fail the run*, not print a warning. After
+saturation the table is silently wrong (a 256 counted as 255 decrements
+to 254), the block's costs drift, and an unattended 4-hour run would
+carry a wrong best until a recount happened to catch it. On these graphs
+γ is about 6, so the failure never fires; it exists so that a counted
+result cannot be wrong.
+
 3. **A2.6, kernel: 8-bit conflict table when 16-bit tables overflow
-   shared memory.** γ[v][c] counts v's neighbours of colour c; on these
+   shared memory.** (Implemented; see the smoke test above.) γ[v][c] counts v's neighbours of colour c; on these
    graphs it is around 6 and never near 255 in a near-legal colouring.
    An 8-bit table is n·k = 82 KB, and with the 8-bit colouring and the
    conflict list it fits the 99 KB opt-in at one block per SM. Saturate
@@ -686,7 +715,9 @@ is not comparable; iterations are the unit, as planned. Decisions:
    reference solution's routes plus one spare vehicle, a choice the paper
    does not state in the pages read; run Golden 1–8 with `--vehicles` at
    the reference count, since a spare vehicle changes what the duration
-   limit costs. Both together are under 3 CPU-hours.
+   limit costs. Both together are under 3 CPU-hours. (`--no-spare` and
+   the restartable runner `scripts/p7-cvrp.sh` with `p7-summary.py` are
+   done, c2c1e17; the runs are pending.)
 3. GENI (types I and II, neighbourhood q as the paper) only if (2a) shows
    the constant-factor pattern; then Golden with 10 seeds at 10⁵ is the
    acceptance run (at or below 1.30%).
@@ -762,11 +793,11 @@ is reported as "exploratory" and does not change a default.
 
 ## 7. Order of work
 
-GPU queue (one run at a time on the RTX 3060): Q6 tai50a, B at 40n² and
-off (5 h) → A2 smoke test on DSJC1000.5 (10 min), then the 8-bit table
-comparison if needed → Q6 tai60a, B and C (5 h), then the sko100a check
-(1 h) → A2 calibration runs, 4 h each → Q7 tai256c, cohesive, 4 h → Q6
-tai80a, B and C at 60 minutes (10 h) → Q5.
+GPU queue (one run at a time on the RTX 3060): A2 smoke test with
+`--table 8` on DSJC1000.5 (10 min, after the saturation-fails-the-run
+change) → Q6 tai60a, B and C at 20n² (5 h), then the sko100a check
+(1 h) → A2 calibration runs at the faster table, 4 h each → Q7 tai256c,
+cohesive, 4 h → Q6 tai80a, B and C at 60 minutes (10 h) → Q5.
 
 Sandbox queue while the GPU runs, in order:
 1. Q9 done (retired); the baseline's seed 5 completes the 5n² arm of Q10.
