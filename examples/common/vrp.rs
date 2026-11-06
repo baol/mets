@@ -216,11 +216,13 @@ impl Instance {
     }
 }
 
-/// A `.sol` file: routes of customers (1..n, as in the file) and the stated cost.
-pub fn read_sol(path: &Path) -> Result<(Vec<Vec<usize>>, Option<f64>), String> {
+/// A `.sol` file: routes of customers (1..n, as in the file), the stated
+/// cost, and the precision it is written with (half a unit of its last
+/// digit: Golden's files round to one decimal, CMT's to two).
+pub fn read_sol(path: &Path) -> Result<(Vec<Vec<usize>>, Option<f64>, f64), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut routes = Vec::new();
-    let mut cost = None;
+    let (mut cost, mut precision) = (None, 0.0);
     for line in text.lines().map(str::trim) {
         let lower = line.to_lowercase();
         if lower.starts_with("route") {
@@ -231,10 +233,13 @@ pub fn read_sol(path: &Path) -> Result<(Vec<Vec<usize>>, Option<f64>), String> {
                     .collect::<Result<_, _>>()?,
             );
         } else if lower.starts_with("cost") {
-            cost = line.split_whitespace().nth(1).and_then(|x| x.parse().ok());
+            let text = line.split_whitespace().nth(1).unwrap_or("");
+            cost = text.parse().ok();
+            let decimals = text.split_once('.').map_or(0, |(_, d)| d.len());
+            precision = 0.5 * 10f64.powi(-(decimals as i32));
         }
     }
-    Ok((routes, cost))
+    Ok((routes, cost, precision))
 }
 
 /// Penalty weights of the relaxed constraints (Cordeau, Laporte & Mercier's

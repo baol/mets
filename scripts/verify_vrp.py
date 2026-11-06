@@ -91,15 +91,18 @@ def distance_matrix(spec, sections, real):
 
 
 def read_sol(path):
-    routes, cost = [], None
+    routes, cost, precision = [], None, 0.0
     for line in Path(path).read_text().splitlines():
         line = line.strip()
         if line.lower().startswith("route"):
             _, _, rest = line.partition(":")
             routes.append([int(x) for x in rest.split()])
         elif line.lower().startswith("cost"):
-            cost = float(line.split()[1])
-    return routes, cost
+            text = line.split()[1]
+            cost = float(text)
+            decimals = len(text.split(".")[1]) if "." in text else 0
+            precision = 0.5 * 10 ** -decimals  # the stated cost is rounded to its digits
+    return routes, cost, precision
 
 
 def verify(vrp, sol, real=None):
@@ -123,7 +126,7 @@ def verify(vrp, sol, real=None):
         service = {i: float(spec["SERVICE_TIME"]) for i in range(1, n)}
     service.update({index[int(r[0])]: float(r[1]) for r in sections.get("SERVICE_TIME_SECTION", [])})
     windows = {index[int(r[0])]: (float(r[1]), float(r[2])) for r in sections.get("TIME_WINDOW_SECTION", [])}
-    routes, claimed = read_sol(sol)
+    routes, claimed, precision = read_sol(sol)
     problems = []
     seen = [0] * n
     total = 0.0
@@ -161,8 +164,11 @@ def verify(vrp, sol, real=None):
         problems.append(f"{len(missing)} customers not visited (e.g. {missing[:5]})")
     if twice:
         problems.append(f"{len(twice)} customers visited more than once (e.g. {twice[:5]})")
-    # rounded distances: exact; real distances: the stated cost carries a few decimals
-    cost_ok = claimed is not None and abs(total - claimed) <= (1e-6 if not real else 0.01)
+    # rounded distances: exact; real distances: equal at the precision the
+    # stated cost is written with (half a unit of its last digit)
+    # (never stricter than 1e-3: files that state six decimals still differ
+    # by ~1e-4 from a double-precision sum, the writer's float error)
+    cost_ok = claimed is not None and abs(total - claimed) <= (1e-6 if not real else max(precision, 1e-3))
     status = "OK" if cost_ok and not problems else "FAIL"
     detail = f"{name}: {len(routes)} routes, cost recomputed {total:.4f}, stated {claimed}, {'real' if real else 'rounded'} distances"
     return status, detail, problems

@@ -56,11 +56,13 @@ fn main() {
                 continue;
             }
         };
-        let (routes, stated) = read_sol(&sol).unwrap_or_else(|e| panic!("{e}"));
+        let (routes, stated, precision) = read_sol(&sol).unwrap_or_else(|e| panic!("{e}"));
         let s = Routes::new(&inst, routes, Penalties::default());
         let (dist, eval) = (s.distance(), s.evaluate());
         let tol = if inst.rounding == Some(Rounding::Real) {
-            0.01
+            // equal at the precision the cost is written with, but never stricter
+            // than 1e-3 (six-decimal files carry the writer's float error)
+            precision.max(1e-3)
         } else {
             1e-6
         };
