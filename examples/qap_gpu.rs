@@ -1005,10 +1005,15 @@ fn main() {
     let mut children = pop.clone();
     let mut cross: Box<dyn Crossover<QapPlain>> = match crossover.as_str() {
         "uniform" => Box::new(UniformCrossover),
-        "cohesive" => match inst.cohesive_crossover() {
-            Some(x) => Box::new(x),
-            None => {
-                eprintln!("note: no distance matrix in this instance; using uniform crossover");
+        "cohesive" => match (inst.proximity(), inst.cohesive_crossover()) {
+            (Some(px), Some(x)) => {
+                eprintln!("cohesive crossover on the {}", px.describe());
+                Box::new(x)
+            }
+            _ => {
+                eprintln!(
+                    "note: no distance or similarity matrix in this instance; using uniform crossover"
+                );
                 Box::new(UniformCrossover)
             }
         },

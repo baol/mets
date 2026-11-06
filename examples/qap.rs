@@ -544,6 +544,76 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Taillard's grey-density layout: an s×s torus, similarity
+    /// 100,000 / (dx² + dy²) between cells, and a 0/1 flow among m cells.
+    fn grey_density(s: usize, m: usize) -> Instance {
+        let n = s * s;
+        let wrap = |d: usize| d.min(s - d) as f64;
+        let b: Vec<C> = (0..n * n)
+            .map(|k| {
+                let (p, q) = (k / n, k % n);
+                if p == q {
+                    return 0;
+                }
+                let (dx, dy) = (wrap((p / s).abs_diff(q / s)), wrap((p % s).abs_diff(q % s)));
+                (100_000.0 / (dx * dx + dy * dy)).round() as C
+            })
+            .collect();
+        let a: Vec<C> = (0..n * n)
+            .map(|k| ((k / n) < m && (k % n) < m) as C)
+            .collect();
+        Instance::new(n, a, b)
+    }
+
+    #[test]
+    fn proximity_detects_distances_and_similarities() {
+        // sko-like: grid distances in the first matrix, random flows in the second.
+        let s: usize = 6;
+        let n = s * s;
+        let a: Vec<C> = (0..n * n)
+            .map(|k| {
+                let (p, q) = (k / n, k % n);
+                ((p / s).abs_diff(q / s) + (p % s).abs_diff(q % s)) as C
+            })
+            .collect();
+        let mut rng = mets::DefaultRng::seed_from_u64(3);
+        let b: Vec<C> = (0..n * n)
+            .map(|k| {
+                if k / n == k % n {
+                    0
+                } else {
+                    rng.random_range(0..10)
+                }
+            })
+            .collect();
+        let sko = Instance::new(n, a, b);
+        let px = sko.proximity().expect("grid distances");
+        assert!(!px.over_elements && !px.similarity);
+
+        let grey = grey_density(8, 20);
+        assert!(grey.distance().is_none(), "1/d² is not a metric");
+        let px = grey.proximity().expect("similarity on the torus");
+        assert!(px.over_elements && px.similarity, "{}", px.describe());
+        // The crossover ranks the pivot's torus neighbours first: a ball of 5
+        // around cell 0 is the cell and its 4 neighbours (1, 7, 8, 56). With
+        // a = identity the child keeps a at those positions and takes b
+        // elsewhere where the element is still free.
+        let x = grey.cohesive_crossover().unwrap();
+        let a: Vec<usize> = (0..64).collect();
+        let b: Vec<usize> = (0..64).rev().collect();
+        let child = x.child_with(&a, &b, 0, 5);
+        for i in [0, 1, 7, 8, 56] {
+            assert_eq!(child[i], i, "position {i} comes from a");
+        }
+        assert_eq!(child[2], b[2]);
+        assert_eq!(child[61], b[61], "element 2 is free");
+        let mut sorted = child.clone();
+        sorted.sort();
+        assert_eq!(sorted, a);
+
+        assert!(Instance::random(20, 1).proximity().is_none());
+    }
+
     #[test]
     fn deltas_match_full_evaluation() {
         let inst = Instance::random(13, 5);

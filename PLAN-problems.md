@@ -90,16 +90,29 @@ large values.
 
 ### Q7. tai256c on the GPU
 
-n = 256: the delta triangle (131 KB in i32) does not fit shared memory, so
-this is the first real use of the kernel's global-memory path. The flow
-matrix is a grey-density pattern and the distance matrix a grid, so
-cohesive crossover applies (`proximity_matrix` should accept it; check the
-triangle-inequality sample passes). Best known 44,759,294 has been improved
+n = 256: the delta triangle (261 KB in i64) does not fit shared memory, so
+this is the first real use of the kernel's global-memory path (step 1
+done: `reports/2026-11-06-q7-tai256c-cpu-check.md`, host loop clean,
+0.5 MB per member on the device). Best known 44,759,294 has been improved
 several times since 2000, each by a few hundred units; it is the one
 QAPLIB instance where a beat is realistic for a method of this class.
 
-Steps: (1) `--cpu` run of the host loop on tai256c to confirm memory and
-`proximity_matrix`; (2) GPU run at k = `--iters 100`, `--run-to-end`,
+Decision on the report's finding: the second matrix of tai256c is a
+*similarity* (Taillard's grey density: entries ∝ 1/d² between cells of a
+torus, larger meaning closer), so it fails the metric test by design and
+`--crossover cohesive` was silently uniform. The cohesive crossover only
+needs a ranking by closeness, so `Instance::proximity` now also accepts a
+symmetric, zero-diagonal, positive matrix whose `1/√s` satisfies the
+triangle inequality on the sample (true for s = 1/dᵖ, p ≤ 2, with d a
+metric; collinear triples are ties, compared with a 10⁻⁶ tolerance), and
+ranks by decreasing s, over elements when it is the second matrix. Both
+examples print which matrix and transform the crossover uses; a run whose
+log does not say "cohesive crossover on the second matrix, a similarity"
+is a uniform run. Unit-tested on a synthetic 8×8 grey-density instance.
+`distance()` is unchanged, so the k-opt groups stay random on tai256c.
+
+Steps: (1) done; rerun `--cpu` once to see the new crossover line in the
+log; (2) GPU run at `--iters 100`, `--run-to-end`,
 `--max-seconds 14400`, trace on; (3) if it ties, `--kopt 9` on the result
 (cheap, and the only place polish has a chance, since the instance has
 many zero flows). Verify any value below 44,759,294 by recount from the

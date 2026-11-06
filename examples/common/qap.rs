@@ -163,46 +163,93 @@ impl Instance {
         ))
     }
 
+    /// Symmetric with a zero diagonal, and `f` of the entries satisfies the
+    /// triangle inequality on at least 99% of 1,000 sampled triples.
+    fn metric_under(&self, m: &[C], f: impl Fn(C) -> f64) -> bool {
+        let n = self.n;
+        let symmetric =
+            (0..n).all(|i| m[i * n + i] == 0 && (i + 1..n).all(|j| m[i * n + j] == m[j * n + i]));
+        if !symmetric {
+            return false;
+        }
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        let ok = (0..1000)
+            .filter(|_| {
+                let (i, j, k) = (next(), next(), next());
+                // Collinear triples are ties; integer rounding must not break them.
+                f(m[i * n + k]) <= (f(m[i * n + j]) + f(m[j * n + k])) * (1.0 + 1e-6)
+            })
+            .count();
+        ok >= 990
+    }
+
     /// The matrix that looks like a distance (symmetric, zero diagonal, and
     /// the triangle inequality on at least 99% of 1,000 sampled triples):
     /// `Some((false, a))` when it is the first (distances between positions,
     /// as in sko, tho, wil), `Some((true, b))` when only the second is
     /// (distances between elements), `None` for random instances (tai-a).
     pub fn distance(&self) -> Option<(bool, &[C])> {
-        let n = self.n;
-        let metric = |m: &[C]| {
-            let symmetric = (0..n)
-                .all(|i| m[i * n + i] == 0 && (i + 1..n).all(|j| m[i * n + j] == m[j * n + i]));
-            let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
-            let mut next = || {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                (x % n as u64) as usize
-            };
-            let ok = (0..1000)
-                .filter(|_| {
-                    let (i, j, k) = (next(), next(), next());
-                    m[i * n + k] <= m[i * n + j] + m[j * n + k]
-                })
-                .count();
-            symmetric && ok >= 990
-        };
-        if metric(&self.a) {
+        if self.metric_under(&self.a, |v| v as f64) {
             Some((false, &self.a))
-        } else if metric(&self.b) {
+        } else if self.metric_under(&self.b, |v| v as f64) {
             Some((true, &self.b))
         } else {
             None
         }
     }
 
-    /// Drezner's cohesive crossover for this instance, if it has a distance.
+    /// A matrix that ranks positions (or elements) by closeness: a distance
+    /// (`distance`), or else a *similarity*, where larger means closer, as
+    /// in Taillard's grey-density instances (tai64c, tai256c: entries
+    /// proportional to 1/d² on a torus). A similarity is symmetric with a
+    /// zero diagonal, positive off the diagonal, and `1/√s` satisfies the
+    /// triangle inequality on the sample (true for `s = 1/d^p`, p ≤ 2, with
+    /// d a metric). Only the ranking matters to the cohesive crossover.
+    pub fn proximity(&self) -> Option<Proximity<'_>> {
+        if let Some((over_elements, matrix)) = self.distance() {
+            return Some(Proximity {
+                over_elements,
+                similarity: false,
+                matrix,
+            });
+        }
+        let n = self.n;
+        let positive = |m: &[C]| (0..n).all(|i| (0..n).all(|j| i == j || m[i * n + j] > 0));
+        // Only the diagonal is 0 (checked by `positive`): distance 0.
+        let inv_sqrt = |v: C| if v == 0 { 0.0 } else { 1.0 / (v as f64).sqrt() };
+        for (over_elements, m) in [(false, &self.a), (true, &self.b)] {
+            if positive(m) && self.metric_under(m, inv_sqrt) {
+                return Some(Proximity {
+                    over_elements,
+                    similarity: true,
+                    matrix: m,
+                });
+            }
+        }
+        None
+    }
+
+    /// Drezner's cohesive crossover for this instance, if it has a proximity.
     pub fn cohesive_crossover(&self) -> Option<mets::perm::CohesiveCrossover> {
         let n = self.n;
-        self.distance().map(|(over_elements, d)| {
-            let x = mets::perm::CohesiveCrossover::new(n, |p, q| d[p * n + q] as f64);
-            if over_elements {
+        self.proximity().map(|px| {
+            let d = px.matrix;
+            let x = if px.similarity {
+                // 0 off the diagonal would mean "infinitely far": sort last.
+                mets::perm::CohesiveCrossover::new(n, |p, q| match d[p * n + q] {
+                    0 if p != q => f64::INFINITY,
+                    v => 1.0 / v as f64,
+                })
+            } else {
+                mets::perm::CohesiveCrossover::new(n, |p, q| d[p * n + q] as f64)
+            };
+            if px.over_elements {
                 x.over_elements()
             } else {
                 x
@@ -213,6 +260,38 @@ impl Instance {
     pub fn read(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// What `Instance::proximity` found: which matrix ranks positions (or
+/// elements, `over_elements`) by closeness, and whether larger means closer.
+pub struct Proximity<'a> {
+    pub over_elements: bool,
+    pub similarity: bool,
+    pub matrix: &'a [C],
+}
+
+impl Proximity<'_> {
+    /// One line for the logs: "first matrix, a distance between positions".
+    pub fn describe(&self) -> String {
+        format!(
+            "{} matrix, a {} between {}",
+            if self.over_elements {
+                "second"
+            } else {
+                "first"
+            },
+            if self.similarity {
+                "similarity (larger is closer)"
+            } else {
+                "distance"
+            },
+            if self.over_elements {
+                "elements"
+            } else {
+                "positions"
+            }
+        )
     }
 }
 
