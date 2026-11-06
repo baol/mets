@@ -40,6 +40,14 @@ What it does not support yet:
   time (A1.8, A2). No colouring result since the 48 on DSJC500.5 changes
   the position.
 
+Caveat on every time-to-target measured before build beb9bb6: a best
+reached by a perturbation or a crossover was recorded only when the inner
+scope closed and without an event, so the stop at the target could fire
+late (found while fixing Q9: BLS reached tai30a's optimum at 3.5 s and
+reported 11.3 s). Random perturbations make this rare, so the ties stand
+and the earlier times are upper bounds, not re-measured. Time-to-target
+comparisons from now on use builds at or after beb9bb6.
+
 Rule going forward: a method earns a default only after a §6 measurement
 on at least two instances from different families. Otherwise it stays a
 flag, documented as "available, not better".
@@ -109,13 +117,50 @@ tai30a reach the optimum with clean recounts. GPU run pending. Review:
    never worse than the previous batch).
 3. `scripts/q6-grid.sh` runs the spec (3 instances × 3 arms × 5 seeds ×
    1 h = 45 GPU-hours on one card). Stage it: the aspiration sweep on
-   tai50a first (`SWEEP=1`, 30-minute budget is enough there: the memetic
-   tie took 13 minutes on 4 cores), then tai50a with all three arms at the
-   winning aspiration, then tai60a and tai80a only with the arms that
-   reached tai50a's best known on at least 3 of 5 seeds. An arm that
-   cannot tie tai50a has nothing to say about tai80a. Results under
-   `results/q6/` stay out of git (logs and traces); the summary
+   tai50a first, then tai50a with all three arms at the winning
+   aspiration, then tai60a and tai80a only with the arms that reached
+   tai50a's best known on at least 3 of 5 seeds. An arm that cannot tie
+   tai50a has nothing to say about tai80a. Results under `results/q6/`
+   stay out of git (logs and traces); the summary
    (`scripts/q6-summary.py`) goes in a report.
+4. Review items 1 and 2 done (build 1cd68a8: the CPU path resumes each
+   member's tabu state; the loop asserts no member's best worsens across a
+   batch; 2,546 resumed batches on tai30a clean).
+
+*Sweep result (RTX 3060, tai50a, arm B, 112 trajectories, 200n per
+batch, 5 seeds, 1 hour each).*
+
+| aspiration | best at 5 min (median) | reached | time to best known, reached seeds only (median, max) |
+|---|---|---|---|
+| 2n² | 4,953,480 | 3/5 | 493 s, 658 s |
+| 5n² | 4,941,410 | 4/5 | 403 s, 575 s |
+| 10n² | 4,941,410 | 5/5 | 355 s, 1,549 s |
+
+Reading: the medians of the time to target are over the seeds that
+reached it, so 493 s for 2n² is not "faster than 10n²"; the reach count
+is the result, and it is monotone in the aspiration age, which is what
+Taillard reports for tai-a. Three levels of five seeds each is thin for
+any single pair, the trend is the evidence. All three arms sit at
+4,941,410 at 5 minutes, the same deep attractor the CPU memetic stalled
+on for 30 minutes: on tai50a the whole question is leaving that one
+optimum, and independent long trajectories do it in a median of 6
+minutes, 5 of 5.
+
+Decisions:
+* Aspiration 10n² for every tai-a arm from here (`EXTRA="--aspiration
+  10"`); the GPU default stays Taillard's 5n² until a second instance
+  agrees (§0 rule).
+* The best level was the edge of the sweep, so one more level: B at 20n²
+  on tai50a, 5 seeds, same budget. If 20n² also reaches 5/5 with a lower
+  median than 10n², extend once more; if its reach count drops, 10n² is
+  settled.
+* The five B-asp10 runs are arm B on tai50a: run only `ARMS="A C"` there
+  (10 GPU-hours). The question tai50a then answers is A against B: if the
+  population at 10n² does not reach 5/5 with a median under 355 s, the
+  Q6 hypothesis holds at n = 50 and B/C go on to tai60a and tai80a; if A
+  matches B, both go on and tai80a decides.
+* Each tie is checked with `scripts/verify_qap.py` before it is counted;
+  the report carries the recounts, not only the summary table.
 
 ### Q7. tai256c on the GPU
 
@@ -170,8 +215,10 @@ it; add `--method bls`). If it does not reach tai50a's value in 1 hour,
 in minutes to hours of 2013 CPU; a faithful port should at least tie
 tai50a.
 
-*Status (build 839cc59, `reports/2026-11-06-q6-q9.md`).* `--method bls`
-done; the Q2 perturbation cycled under `Always` acceptance (strength and
+*Status (builds 839cc59, beb9bb6; `reports/2026-11-06-q6-q9.md`).*
+`--method bls` done; the run was restarted on beb9bb6 (stop-at-target
+bug, see §0) with 5 seeds on both arms, single-threaded, 1 hour each;
+BLS prints cycles and cycles per second (8,700–8,900/s on tai30a); the Q2 perturbation cycled under `Always` acceptance (strength and
 directed share only moved on an exact return to the same cost) and was
 rewritten to the BLS rule: directed probability max(e^(−ω/T), P₀), ω the
 perturbations since the last new best, strength from L₀ = 0.15n, +1 per
@@ -180,9 +227,9 @@ without a new best. Run in progress (5 seeds, single-threaded, 1 hour).
 Consequences and review:
 1. The Q2 numbers in `reports/2026-11-05-records-round.md` describe the
    old rule and are void; Q9 replaces Q2 entirely.
-2. The baseline arm (`memetic`, single-threaded, same budget) runs 3
-   seeds; §6 needs 5. The 756 s tai50a tie is a 4-thread result and is
-   not the baseline for a single-threaded comparison.
+2. The baseline arm (`memetic`, single-threaded, same budget) has 5
+   seeds since the restart. The 756 s tai50a tie is a 4-thread result and
+   is not the baseline for a single-threaded comparison.
 3. T = 2,500, P₀ = 0.75, L₀ = 0.15n, L_max = n/2 match my own recollection
    of Benlic & Hao (C&OR 40, 2013, 192–200); the perturbation tenure (here
    n) I am not sure of. Two known deviations: the local search is
