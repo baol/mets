@@ -399,7 +399,19 @@ carry a wrong best until a recount happened to catch it. On these graphs
 result cannot be wrong.
 
 3. **A2.6, kernel: 8-bit conflict table when 16-bit tables overflow
-   shared memory.** (Implemented; see the smoke test above.) γ[v][c] counts v's neighbours of colour c; on these
+   shared memory.** Implemented (6b589ea; saturation fails the run,
+   53e563e) and measured (`reports/2026-11-06-a2-smoke-test.md`): 4×
+   *slower*, 0.27 M against 1.2 M it/s. The 84 KB table leaves one block
+   per SM, so 28 individuals run at a time with 4 warps each, against
+   252 blocks on global memory; the lost concurrency outweighs the
+   faster table at 128 threads per block. Decision: two 10-minute runs,
+   `--table 8 --threads 512` and `--threads 1024` (one block per SM can
+   afford the warps, and the scan over conflicting vertices × colours is
+   what they would feed). If neither beats 1.2 M it/s, A2.6 is closed as
+   a negative, `--table auto` prefers global 16-bit tables whenever the
+   16-bit shared ones do not fit, and the 4-hour runs go on global
+   tables. The lesson either way goes in DESIGN beside the DSJC500.5
+   kernel table: shared memory pays only while it leaves 2 blocks per SM. γ[v][c] counts v's neighbours of colour c; on these
    graphs it is around 6 and never near 255 in a near-legal colouring.
    An 8-bit table is n·k = 82 KB, and with the 8-bit colouring and the
    conflict list it fits the 99 KB opt-in at one block per SM. Saturate
@@ -702,27 +714,53 @@ refinement by 2-opt and Or-opt:
 | Golden 1–20 | 2.10% | 1.30% |
 
 Our run is 20× faster per iteration than the paper's (no GENI), so time
-is not comparable; iterations are the unit, as planned. Decisions:
-1. CMT: lock the acceptance now with 10 seeds at η = 10⁵ (about 15 CPU
-   minutes) and 10 seeds at 10⁶; passes if the means are at or below
-   0.60% and 0.27%. Then the DESIGN entry for the CVRP and the two
-   library additions (§3 for the API, §4 for the numbers).
-2. Golden, before GENI, two cheap diagnostics: (a) η = 10⁶, one seed
-   (the paper's mean falls from 1.30% to 0.79%; if ours falls by a
-   similar ratio, the deficit is a constant factor of the neighbourhood,
-   which is GENI's; if it does not fall, the phase dynamics are wrong
-   somewhere and GENI would hide it); (b) the fleet: the default is the
-   reference solution's routes plus one spare vehicle, a choice the paper
-   does not state in the pages read; run Golden 1–8 with `--vehicles` at
-   the reference count, since a spare vehicle changes what the duration
-   limit costs. Both together are under 3 CPU-hours. (`--no-spare` and
-   the restartable runner `scripts/p7-cvrp.sh` with `p7-summary.py` are
-   done, c2c1e17; the runs are pending.)
-3. GENI (types I and II, neighbourhood q as the paper) only if (2a) shows
-   the constant-factor pattern; then Golden with 10 seeds at 10⁵ is the
-   acceptance run (at or below 1.30%).
-4. The parallel scheme follows the acceptance, and is measured on pr05 as
-   the paper does (Fig. 2) before any GPU work.
+is not comparable; iterations are the unit, as planned.
+
+*Acceptance and diagnostics done
+(`reports/2026-11-06-p7-acceptance-and-diagnostics.md`, 10 seeds on CMT,
+every `.sol` recounted).*
+
+| | η = 10⁵ | η = 10⁶ |
+|---|---|---|
+| CMT 1–14, ours (10 seeds) | 0.50% | 0.26% |
+| paper, Table 9 | 0.60% | 0.27% |
+
+**The port is accepted on CMT**, at both budgets; "matches" is the word
+at 10⁶ (0.01 points). The residual sits in CMT5, 10 and 13 at about 1%.
+Golden diagnostics, one seed: (a) η = 10⁶ takes the mean from 2.10% to
+1.37%, ×0.65, where the paper goes 1.30% → 0.79%, ×0.61: the same
+ratio, so the phase dynamics scale as the paper's and the deficit is a
+constant factor of the neighbourhood, GENI's. (b) The reference fleet
+without the spare vehicle is better on Golden 1–6 (1.35% against 1.91%)
+and finds no feasible solution on Golden 7 and 8 in 10⁵ iterations: the
+default stays at reference + 1. GENI is implemented (709ed58,
+`--insertion geni`, p = 5, types I and II in both orientations, removal
+still by reconnection; exhaustively tested against brute force), at
+about 100× the cost of plain insertion per iteration on CMT, which is
+1.7× the paper's time per 10⁵: the paper's cost scale, as expected. Its
+first Golden run is in progress.
+
+Decisions:
+1. DESIGN now: the CVRP example (§3: `with_score`, `Adjusting`, the
+   attribute tabu and aspiration as a worked example; §4: the CMT table
+   above with the paper's columns, the Golden diagnostics, GENI's cost).
+   CMT acceptance does not wait for Golden.
+2. GENI on Golden, one seed at 10⁵, against 2.10% plain and the paper's
+   1.30%: at or below 1.5%, Golden goes to its 10-seed acceptance at 10⁵
+   (pass at or below 1.30%) and GENI becomes the default insertion;
+   between 1.5% and 2.1%, the next suspects in order are the removal by
+   unstringing (GENI's US), GENI with q doubled in the route refinement
+   instead of 2-opt/Or-opt, and GENI in the cluster reinsertion, each one
+   measured alone on Golden 1–4 and 9–12 before the next; no better than
+   plain, GENI stays a flag and the port is accepted on CMT only, which
+   the DESIGN entry says.
+3. The parallel scheme (step 8) follows Golden. The paper's scaling curve
+   (Fig. 2) is on pr05, a *periodic* VRP instance the port does not read;
+   measure the curve on CMT5 and Golden 20 instead, at 125,000 iterations
+   per process with N = 1, 2, 4 on the sandbox and the owner's core count
+   on their machine: gap and wall time against N, the paper's shape
+   (gap falling, time within ~25% per tripling) is the pass. Only then
+   the GPU direction.
 
 **Research direction: Fig. 2 at N = 1,000.** The parallel scheme is the
 `qap_gpu` pattern exactly: one block per process, a phase of tabu
@@ -793,10 +831,10 @@ is reported as "exploratory" and does not change a default.
 
 ## 7. Order of work
 
-GPU queue (one run at a time on the RTX 3060): A2 smoke test with
-`--table 8` on DSJC1000.5 (10 min, after the saturation-fails-the-run
-change) → Q6 tai60a, B and C at 20n² (5 h), then the sko100a check
-(1 h) → A2 calibration runs at the faster table, 4 h each → Q7 tai256c,
+GPU queue (one run at a time on the RTX 3060): A2 block-width test,
+`--table 8 --threads 512` and `1024` on DSJC1000.5 (10 min each) → Q6
+tai60a, B and C at 20n² (5 h), then the sko100a check (1 h) → A2
+calibration runs, 4 h each, on whichever table won → Q7 tai256c,
 cohesive, 4 h → Q6 tai80a, B and C at 60 minutes (10 h) → Q5.
 
 Sandbox queue while the GPU runs, in order:
@@ -810,10 +848,10 @@ Sandbox queue while the GPU runs, in order:
    line, the 24-bit move index path, a few generations with `--trace`),
    and the two k values confirmed from a source the owner provides (the
    sandbox cannot reach the literature). No GPU run before both are done.
-3. P7: steps 1–8 and the library additions are done. Next, in order:
-   the CMT acceptance with 10 seeds at 10⁵ and 10⁶; the two Golden
-   diagnostics (η = 10⁶, fleet without the spare vehicle); GENI if the
-   diagnostics say so; the DESIGN entry.
+3. P7: accepted on CMT; GENI running on Golden. Next, in order: the
+   DESIGN entry; the GENI decision (P7 decision 2); Golden's 10-seed
+   acceptance if GENI earns it; the parallel scheme and its curve on
+   CMT5 and Golden 20.
 4. Q10 runs on the owner's machine; its report is read like the others.
 
 1. Q5 (GPU ablation of cohesive crossover) and A3 (pending GPU runs):
