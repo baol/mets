@@ -25,6 +25,18 @@ best known was found anywhere.
 * k-opt polish of it (`--polish-from tho150.best`, k = 9, 1,024 groups of 9
   close positions per round, 20 rounds without improvement): no improvement;
   `tho150.kopt.best` is identical to `tho150.best`.
+* Recount with `scripts/verify_qap.py` (no solver code), output:
+  `n = 150; claimed 8133398; recomputed 8133398: OK` and
+  `.sln best known 8133398; this solution is the published assignment; tie
+  the .sln value`. The same for `tho150.kopt.best`. The permutation
+  (1-based element at each position) is
+  `137 7 73 11 26 129 77 50 27 115 65 111 110 148 60 15 81 68 116 37 108 140
+  103 78 75 30 138 72 124 21 24 82 22 59 48 55 144 135 45 54 61 46 44 105 112
+  99 4 133 123 71 101 40 150 80 79 104 66 97 86 47 25 92 64 96 36 131 114 3
+  90 146 58 42 63 10 127 18 87 39 126 23 76 132 56 12 143 141 16 88 119 32 93
+  107 109 51 19 52 33 134 1 28 100 84 94 43 17 120 2 35 53 69 95 130 122 8 70
+  89 49 136 117 34 142 38 128 147 139 13 41 83 145 121 91 67 125 29 98 85 62
+  6 20 74 57 5 106 113 118 31 14 149 102 9`.
 * Caveat (from `PLAN-problems.md` §0): this one run combined the cohesive
   crossover with the symmetric kernel and the shared-memory delta matrix; it
   does not show that the cohesive crossover helped.
@@ -65,6 +77,10 @@ symmetric formulas (different instance, so not a clean comparison).
 * Robust tabu speed against Taillard's algorithm in C (one core, 10,000
   iterations): tai50a 84 k vs 64 k it/s, tai100a 21 k vs 16 k, tai150b
   6.6–7.2 k vs 7.6 k, tai256c 1.9 k vs 1.9 k.
+
+The sandbox solution files behind these numbers recount correctly with
+`scripts/verify_qap.py` (tho150 8,141,304; tai50a 4,958,170; tai256c
+44,867,992). Run directories stay out of git (`PLAN-problems.md` Q6).
 
 ## Graph colouring
 

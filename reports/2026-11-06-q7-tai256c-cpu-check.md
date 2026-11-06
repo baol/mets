@@ -1,5 +1,7 @@
 # Q7 step 1: tai256c on the CPU host loop
 
+The `.best` file recounts to 44,867,992 with `scripts/verify_qap.py`.
+
 Build `f630430` (sandbox, 4 cores). Command:
 `qap_gpu tai256c.dat tai256c.sln --cpu --crossover cohesive --iters 20
 --max-seconds 120 --trace tai256c-cpu.trace`.

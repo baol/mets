@@ -25,6 +25,8 @@
 #
 # Total for the default grid: 3 instances x 3 arms x 5 seeds x 1 h = 45 GPU-hours.
 # Summarise at any time with:  python3 scripts/q6-summary.py results/q6
+# results/ stays out of git (PLAN-problems.md Q6): the summary goes in a
+# report in reports/.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -82,3 +84,6 @@ for inst in "${instances[@]}"; do
         done
     done
 done
+
+echo "done. Summary: python3 scripts/q6-summary.py results/q6"
+echo "results/ stays out of git: put the summary in a report under reports/"
