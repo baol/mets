@@ -504,23 +504,116 @@ impl<'a> Routes<'a> {
         self.insert_after(c, a);
     }
 
-    /// Intra-route refinement (the paper's every-200-iterations pass): each
-    /// customer of each route is removed and reinserted at its best position
-    /// in the same route, repeated while that shortens a route.
+    /// Intra-route refinement (the paper's every-200-iterations pass, in the
+    /// plan's simpler variant): each route is improved by 2-opt (reverse a
+    /// segment) and Or-opt (move a segment of 1–3 customers elsewhere in the
+    /// route, either way round), first improvement, until neither shortens
+    /// it. Distances are taken as symmetric (2-opt), as in every set read
+    /// here.
     pub fn refine(&mut self) {
         for k in 0..self.m {
-            loop {
-                let before = self.length[k];
-                for c in self.customers(k) {
-                    self.remove(c);
-                    let (a, _) = self.best_insertion(c, k);
-                    self.put(c, a);
-                }
-                if self.length[k] >= before - 1e-9 {
-                    break;
-                }
+            if self.size[k] < 2 {
+                continue;
+            }
+            let mut seq = self.customers(k);
+            if self.improve_sequence(&mut seq) {
+                self.relink(k, &seq);
             }
         }
+    }
+
+    /// 2-opt and Or-opt on a route's customer sequence (depot at both ends);
+    /// true if it changed.
+    fn improve_sequence(&self, seq: &mut Vec<usize>) -> bool {
+        let at = |seq: &[usize], i: isize| -> usize {
+            if i < 0 || i as usize >= seq.len() {
+                0
+            } else {
+                seq[i as usize]
+            }
+        };
+        let d = |a: usize, b: usize| self.inst.d(a, b);
+        let mut changed = false;
+        loop {
+            let mut improved = false;
+            let len = seq.len() as isize;
+            // 2-opt: reverse seq[i..=j]
+            'two: for i in 0..len {
+                for j in i + 1..len {
+                    let (a, b, c, e) = (at(seq, i - 1), at(seq, i), at(seq, j), at(seq, j + 1));
+                    if d(a, c) + d(b, e) < d(a, b) + d(c, e) - 1e-9 {
+                        seq[i as usize..=j as usize].reverse();
+                        improved = true;
+                        break 'two;
+                    }
+                }
+            }
+            if !improved {
+                // Or-opt: move seq[i..i+l] between positions p-1 and p (outside it)
+                'or: for l in 1..=3isize.min(len) {
+                    for i in 0..=len - l {
+                        let (before, first, last, after) = (
+                            at(seq, i - 1),
+                            at(seq, i),
+                            at(seq, i + l - 1),
+                            at(seq, i + l),
+                        );
+                        let cut = d(before, first) + d(last, after) - d(before, after);
+                        for p in 0..=len {
+                            if p >= i && p <= i + l {
+                                continue;
+                            }
+                            let (x, y) = (at(seq, p - 1), at(seq, p));
+                            let base = d(x, y);
+                            let forward = d(x, first) + d(last, y) - base;
+                            let backward = d(x, last) + d(first, y) - base;
+                            let (gain, reversed) = if backward < forward {
+                                (backward, true)
+                            } else {
+                                (forward, false)
+                            };
+                            if gain < cut - 1e-9 {
+                                let mut segment: Vec<usize> =
+                                    seq.drain(i as usize..(i + l) as usize).collect();
+                                if reversed {
+                                    segment.reverse();
+                                }
+                                let q = if p > i { p - l } else { p } as usize;
+                                seq.splice(q..q, segment);
+                                improved = true;
+                                break 'or;
+                            }
+                        }
+                    }
+                }
+            }
+            if !improved {
+                return changed;
+            }
+            changed = true;
+        }
+    }
+
+    /// Replace route k's sequence (same customers, new order).
+    fn relink(&mut self, k: usize, seq: &[usize]) {
+        let start = self.inst.n + k;
+        let mut prev = start;
+        for &c in seq {
+            self.link(prev, c);
+            prev = c;
+        }
+        self.link(prev, start);
+        let mut length = 0.0;
+        let mut x = start;
+        loop {
+            let y = self.succ[x] as usize;
+            length += self.d(x, y);
+            if y == start {
+                break;
+            }
+            x = y;
+        }
+        self.length[k] = length;
     }
 }
 

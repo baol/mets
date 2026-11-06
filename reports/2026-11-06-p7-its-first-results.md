@@ -52,3 +52,26 @@ length limit (1–8) average 3.40%, the others 2.15%.
   first choice), measured on Golden at η = 10⁵; then GENI if the gap stays
   above 1.30%. Ten seeds per instance only once the single-seed numbers
   are in range.
+
+## Second version: 2-opt and Or-opt in the route refinement
+
+Build after `1168797` (this commit): the every-200-iterations refinement is
+now 2-opt and Or-opt (segments of 1–3 customers, either orientation,
+first improvement until neither helps) instead of reinsertion alone. Same
+setting: η = 10⁵, one seed, all solutions verified.
+
+| set | first version | with 2-opt/Or-opt | paper (Table 9, η = 10⁵) |
+|---|---|---|---|
+| CMT 1–14 | 0.57% | **0.44%** (7 best knowns) | 0.60% |
+| Golden 1–20 | 2.65% | **2.10%** | 1.30% |
+| Golden 1–8 (route length limit) | 3.40% | 2.11% | |
+| Golden 9–20 | 2.15% | 2.09% | |
+
+CMT per instance: 0.00, 0.06, 0.00, 0.20, 2.11, 0.00, 0.00, 0.00, 0.35,
+2.07, 0.00, 0.00, 1.24, 0.09. Golden per instance: 1.21, 3.40, 3.13, 2.90,
+0.35, 0.47, 2.55, 2.85, 1.47, 1.31, 1.84, 2.35, 2.55, 2.29, 2.63, 2.52, 0.69,
+2.60, 2.24, 2.59. One seed per instance: single instances move both ways
+(Golden_18 from 1.58% to 2.60%); the means are the signal.
+
+Golden stays above the paper by 0.8 points at equal η, so by the plan GENI
+is next.
