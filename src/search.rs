@@ -54,6 +54,40 @@ pub trait Search<S: Model, R = DefaultRng> {
     fn start(&mut self, _st: &mut State<S, R>) {}
 }
 
+/// A search whose every step is followed by `adjust(&mut state, step)`: the
+/// hook for parameters that change while the search runs and that the
+/// observers (which see `&State` only) cannot change, such as the
+/// self-adjusting penalty weights of Cordeau, Laporte & Mercier's unified
+/// tabu search or a reactive tabu tenure. When `adjust` changes how the
+/// model evaluates (a penalty weight inside the model), it must bring the
+/// cached cost back in line, e.g.
+/// `st.modify_current(|cur, _| cur.modify(|m| m.alpha *= 1.5))`, which
+/// re-evaluates the current solution. Bests recorded under the old weights
+/// keep their old costs: track what matters (the best feasible solution)
+/// yourself.
+pub struct Adjusting<I, F> {
+    pub inner: I,
+    pub adjust: F,
+}
+
+/// `Adjusting { inner, adjust }`.
+pub fn adjusting<I, F>(inner: I, adjust: F) -> Adjusting<I, F> {
+    Adjusting { inner, adjust }
+}
+
+impl<S: Model, R, I: Search<S, R>, F: FnMut(&mut State<S, R>, Step)> Search<S, R>
+    for Adjusting<I, F>
+{
+    fn step(&mut self, st: &mut State<S, R>, obs: &mut dyn Observer<S, R>) -> Step {
+        let step = self.inner.step(st, obs);
+        (self.adjust)(st, step);
+        step
+    }
+    fn start(&mut self, st: &mut State<S, R>) {
+        self.inner.start(st)
+    }
+}
+
 /// Gives every search (including `dyn Search`) the [`runner`](SearchExt::runner) builder.
 pub trait SearchExt<S: Model, R> {
     fn runner<'a>(&'a mut self, st: &'a mut State<S, R>) -> Runner<'a, Self, S, R, Unlimited, ()>;

@@ -623,3 +623,71 @@ fn a_perturbation_that_reaches_a_new_best_is_recorded_and_notified() {
     assert_eq!(st.global_best().cost(), 0);
     assert_eq!(seen, vec![0], "one global improvement, to the optimum");
 }
+
+#[test]
+fn with_score_ranks_moves_by_the_score_and_applies_the_real_delta() {
+    // the plain tabu search's first move from the reversed permutation
+    // touches position 0; a score that forbids that picks another move,
+    // and the cost still changes by the move's real delta
+    let start = Sort(reversed(8));
+    let mut plain = State::new(start.clone(), 1);
+    TabuSearch::new(SwapNeighborhood, DenseTabu::new(Tenure::Fixed(3)))
+        .runner(&mut plain)
+        .until(MaxIterations::new(1))
+        .run();
+    assert_ne!(
+        plain.current().0[0],
+        7,
+        "the plain first move touches position 0"
+    );
+
+    let mut scored = State::new(start.clone(), 1);
+    let mut asked = 0;
+    TabuSearch::new(SwapNeighborhood, DenseTabu::new(Tenure::Fixed(3)))
+        .with_score(|_: &Evaluated<Sort>, m: &perm::Swap, delta: i64| {
+            asked += 1;
+            if m.i == 0 {
+                delta + 1_000
+            } else {
+                delta
+            }
+        })
+        .runner(&mut scored)
+        .until(MaxIterations::new(1))
+        .run();
+    assert!(asked > 0, "the score was consulted");
+    assert_eq!(
+        scored.current().0[0],
+        7,
+        "the scored move leaves position 0 alone"
+    );
+    assert_eq!(
+        scored.current().cost(),
+        scored.current().evaluate(),
+        "real delta applied"
+    );
+    assert!(
+        scored.current().cost() > plain.current().cost(),
+        "a worse move by delta"
+    );
+}
+
+#[test]
+fn adjusting_runs_after_every_step_with_mutable_state() {
+    let mut st = State::new(Sort(reversed(10)), 2);
+    let mut seen = Vec::new();
+    adjusting(
+        LocalSearch::first_improvement(SwapNeighborhood),
+        |st: &mut State<Sort>, step: Step| {
+            seen.push((st.iteration(), step));
+            // a change through &mut State, kept consistent by modify
+            st.modify_current(|cur, _| cur.modify(|_| ()));
+        },
+    )
+    .runner(&mut st)
+    .until(MaxIterations::new(5))
+    .run();
+    assert_eq!(seen.len(), 5);
+    assert!(seen.iter().all(|&(_, s)| s != Step::Stuck));
+    assert_eq!(st.current().cost(), st.current().evaluate());
+}

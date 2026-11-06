@@ -211,32 +211,81 @@ impl<S: Model, M> Aspiration<S, M> for NoAspiration {
     }
 }
 
+/// The score a tabu search ranks moves by, when it is not the move's delta:
+/// frequency-based diversification (Taillard; Cordeau, Laporte & Mercier's
+/// penalty on often-used attributes), guided local search's penalties. The
+/// move applied still changes the cost by its real delta, and aspiration
+/// tests the real cost.
+pub trait Score<S: Model, M> {
+    /// Lower is better. `delta` is the move's real cost change.
+    fn score(&mut self, s: &Evaluated<S>, m: &M, delta: S::Cost) -> S::Cost;
+    /// True when the score is the delta itself; only then may neighborhoods
+    /// prune with `Visitor::bound` / `can_skip`.
+    const IS_DELTA: bool = false;
+}
+
+/// The default: rank moves by their delta.
+pub struct NoScore;
+impl<S: Model, M> Score<S, M> for NoScore {
+    #[inline]
+    fn score(&mut self, _: &Evaluated<S>, _: &M, delta: S::Cost) -> S::Cost {
+        delta
+    }
+    const IS_DELTA: bool = true;
+}
+
+/// A closure as a score: `|s: &Evaluated<S>, m: &M, delta| score`.
+impl<S: Model, M, F: FnMut(&Evaluated<S>, &M, S::Cost) -> S::Cost> Score<S, M> for F {
+    #[inline]
+    fn score(&mut self, s: &Evaluated<S>, m: &M, delta: S::Cost) -> S::Cost {
+        self(s, m, delta)
+    }
+}
+
 /// Best admissible move at each iteration.
-pub struct TabuSearch<N, T, A = BestEver> {
+pub struct TabuSearch<N, T, A = BestEver, F = NoScore> {
     pub neighborhood: N,
     pub tabu: T,
     pub aspiration: A,
+    /// What moves are ranked by (`with_score`); their delta by default.
+    pub score: F,
     /// `random_ties`: choose uniformly among equally good admissible moves.
     ties: Option<DefaultRng>,
 }
 
-impl<N, T> TabuSearch<N, T, BestEver> {
+impl<N, T> TabuSearch<N, T, BestEver, NoScore> {
     pub fn new(neighborhood: N, tabu: T) -> Self {
         TabuSearch {
             neighborhood,
             tabu,
             aspiration: BestEver,
+            score: NoScore,
             ties: None,
         }
     }
 }
 
-impl<N, T, A> TabuSearch<N, T, A> {
-    pub fn with_aspiration<A2>(self, aspiration: A2) -> TabuSearch<N, T, A2> {
+impl<N, T, A, F> TabuSearch<N, T, A, F> {
+    pub fn with_aspiration<A2>(self, aspiration: A2) -> TabuSearch<N, T, A2, F> {
         TabuSearch {
             neighborhood: self.neighborhood,
             tabu: self.tabu,
             aspiration,
+            score: self.score,
+            ties: self.ties,
+        }
+    }
+
+    /// Rank moves by `score(solution, move, delta)` instead of their delta
+    /// (lower is better); the applied move still changes the cost by its
+    /// real delta, and aspiration still tests the real cost. A closure, or
+    /// any [`Score`]. Neighborhoods get no pruning bound with a score.
+    pub fn with_score<F2>(self, score: F2) -> TabuSearch<N, T, A, F2> {
+        TabuSearch {
+            neighborhood: self.neighborhood,
+            tabu: self.tabu,
+            aspiration: self.aspiration,
+            score,
             ties: self.ties,
         }
     }
@@ -252,26 +301,30 @@ impl<N, T, A> TabuSearch<N, T, A> {
     }
 }
 
-struct Admissible<'a, S: Model, R, M, T, A> {
+struct Admissible<'a, S: Model, R, M, T, A, F> {
     st: &'a State<S, R>,
     cur: &'a Evaluated<S>,
     tabu: &'a T,
     asp: &'a A,
+    score: &'a mut F,
+    /// (move, real delta, aspired)
     best: Option<(M, S::Cost, bool)>,
+    /// The best score so far.
     bound: S::Cost,
     /// Random tie-breaking: the RNG, and how many admissible moves tie at `bound`.
     ties: Option<&'a mut DefaultRng>,
     tied: u32,
 }
 
-impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
-    for Admissible<'_, S, R, M, T, A>
+impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>, F: Score<S, M>> Visitor<M, S::Cost>
+    for Admissible<'_, S, R, M, T, A, F>
 {
     #[inline]
     fn visit(&mut self, m: M, delta: S::Cost) -> ControlFlow<()> {
+        let rank = self.score.score(self.cur, &m, delta);
         // tabu status is only checked for moves that would be selected
-        let tie = self.best.is_some() && delta == self.bound && self.ties.is_some();
-        if delta < self.bound || tie {
+        let tie = self.best.is_some() && rank == self.bound && self.ties.is_some();
+        if rank < self.bound || tie {
             let tabu = self.tabu.is_tabu(self.cur, &m, self.st.iteration());
             let aspired = tabu && self.asp.allows(self.st, &m, self.cur.cost() + delta);
             if !tabu || aspired {
@@ -285,7 +338,7 @@ impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
                 } else {
                     self.tied = 1;
                 }
-                self.bound = delta;
+                self.bound = rank;
                 self.best = Some((m, delta, aspired));
             }
         }
@@ -293,12 +346,15 @@ impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
     }
     #[inline]
     fn bound(&self) -> Option<S::Cost> {
-        // with random ties, moves equal to the bound can still be chosen
-        self.ties.is_none().then_some(self.bound)
+        // with random ties, moves equal to the bound can still be chosen;
+        // with a score, a bound on deltas is not a bound on scores
+        (self.ties.is_none() && F::IS_DELTA).then_some(self.bound)
     }
     #[inline]
     fn can_skip(&self, lower: S::Cost) -> bool {
-        if self.ties.is_some() {
+        if !F::IS_DELTA {
+            false
+        } else if self.ties.is_some() {
             self.best.is_some() && lower > self.bound
         } else {
             lower >= self.bound
@@ -306,13 +362,14 @@ impl<S: Model, R, M, T: TabuList<S, M>, A: Aspiration<S, M>> Visitor<M, S::Cost>
     }
 }
 
-impl<S, R, N, T, A> Search<S, R> for TabuSearch<N, T, A>
+impl<S, R, N, T, A, F> Search<S, R> for TabuSearch<N, T, A, F>
 where
     S: Model,
     R: Rng,
     N: Neighborhood<S>,
     T: TabuList<S, N::Move>,
     A: Aspiration<S, N::Move>,
+    F: Score<S, N::Move>,
 {
     fn step(&mut self, st: &mut State<S, R>, obs: &mut dyn Observer<S, R>) -> Step {
         let mut v = Admissible {
@@ -320,6 +377,7 @@ where
             cur: st.current(),
             tabu: &self.tabu,
             asp: &self.aspiration,
+            score: &mut self.score,
             best: None,
             bound: S::Cost::max_value(),
             ties: self.ties.as_mut(),

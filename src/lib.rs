@@ -67,7 +67,7 @@ pub use neighborhood::{
     Sampler, Visitor, WithDeltas,
 };
 pub use population::{crossover_with, Crossover, CrossoverWith, Memetic};
-pub use search::{Outcome, Runner, Search, SearchExt, Step, Stop};
+pub use search::{adjusting, Adjusting, Outcome, Runner, Search, SearchExt, Step, Stop};
 pub use state::{
     log_improvements, on_event, on_global_improvement, on_improvement, on_move, Event,
     LogImprovements, Observer, OnEvent, OnGlobalImprovement, OnImprovement, OnMove, Scope, State,
@@ -77,8 +77,8 @@ pub use stochastic::{
     SimulatedAnnealing, StochasticSearch, ThresholdAccepting,
 };
 pub use tabu::{
-    Aspiration, BestEver, DenseAttr, DenseTabu, DynamicTabu, NoAspiration, RecencyTabu, TabuAttr,
-    TabuList, TabuSearch, Tenure,
+    Aspiration, BestEver, DenseAttr, DenseTabu, DynamicTabu, NoAspiration, NoScore, RecencyTabu,
+    Score, TabuAttr, TabuList, TabuSearch, Tenure,
 };
 pub use termination::{
     stop_when, And, MaxIterations, NoImprovement, Or, StopWhen, Target, Termination,
