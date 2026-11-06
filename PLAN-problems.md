@@ -60,6 +60,9 @@ median and max time to the best known. Then tho150, 5 seeds per arm,
 faster on both sko instances, it is not the reason tho150 was tied, and the
 default stays uniform. Cost: ~1 GPU-hour for sko, ~10 for tho150.
 
+*Status.* Not started; needs the GPU. Nothing in the sandbox substitutes
+for it (the `ma` comparison is a different improvement operator).
+
 ### Q6. tai-a: long single trajectories against populations
 
 Hypothesis: tai-a instances have no shared structure for a child to
@@ -87,6 +90,23 @@ RoTS parameters matter more on tai-a than anywhere: tenure in
 2n²–5n². Expose both on `qap_gpu` and sweep the aspiration (2n², 5n², 10n²)
 on tai50a first, 5 seeds each, since Taillard's own tai-a results use the
 large values.
+
+*Status (build 2720163, `reports/2026-11-06-q6-q9.md`).* Flags done:
+`--independent`, `--perturb-stalled`, `--tenure LO,HI`, `--aspiration X`;
+the kernel resumes each member with its tabu table and absolute iteration
+stamps, the batch seed changes every launch, and the `--cpu` checks on
+tai30a reach the optimum with clean recounts. GPU run pending. Review:
+1. The CPU path ignores `resume` (a fresh tabu memory every batch), so
+   arms B and C on `--cpu` are a different algorithm from the same arms on
+   the GPU, and the trace recount cannot see it (it checks costs, not
+   trajectories). Keep one `RobustTabuSearch` per member across batches
+   on the CPU path, as the kernel does, before the GPU run: `--cpu` is the
+   reference path by the ground rules.
+2. The kernel's aspiration test `ti < it − asp` relies on the staggered
+   "never" stamps `−q`; with `resume` and a long run, `it` keeps growing
+   and that stays right. Add one `--cpu` check of 50 resumed batches on
+   tai30a with `--trace` to confirm nothing drifts (costs recounted, best
+   never worse than the previous batch).
 
 ### Q7. tai256c on the GPU
 
@@ -140,6 +160,33 @@ it; add `--method bls`). If it does not reach tai50a's value in 1 hour,
 5 seeds, retire the direction. BLS claims the best knowns on tai50a–tai80a
 in minutes to hours of 2013 CPU; a faithful port should at least tie
 tai50a.
+
+*Status (build 839cc59, `reports/2026-11-06-q6-q9.md`).* `--method bls`
+done; the Q2 perturbation cycled under `Always` acceptance (strength and
+directed share only moved on an exact return to the same cost) and was
+rewritten to the BLS rule: directed probability max(e^(−ω/T), P₀), ω the
+perturbations since the last new best, strength from L₀ = 0.15n, +1 per
+return, up to n/2, a strong random perturbation of n/2 swaps after T
+without a new best. Run in progress (5 seeds, single-threaded, 1 hour).
+Consequences and review:
+1. The Q2 numbers in `reports/2026-11-05-records-round.md` describe the
+   old rule and are void; Q9 replaces Q2 entirely.
+2. The baseline arm (`memetic`, single-threaded, same budget) runs 3
+   seeds; §6 needs 5. The 756 s tai50a tie is a 4-thread result and is
+   not the baseline for a single-threaded comparison.
+3. T = 2,500, P₀ = 0.75, L₀ = 0.15n, L_max = n/2 match my own recollection
+   of Benlic & Hao (C&OR 40, 2013, 192–200); the perturbation tenure (here
+   n) I am not sure of. Two known deviations: the local search is
+   `SwapDescent` (first improvement, don't-look bits) where BLS uses a
+   best-improvement descent, and the directed move's aspiration is the
+   best cost of the current perturbation where BLS uses the best found so
+   far. If the run is marginal (tai50a reached on some seeds, not all),
+   confirm the parameters against the paper before deciding; if it misses
+   on every seed, the deviations do not explain a miss of that size and
+   the direction is retired as planned.
+4. `--steps` defaults to 10⁸ cycles for `bls`, so the stop is the wall
+   clock: report cycles per second beside the result, as the paper's
+   budgets are in cycles.
 
 ## 2. Graph colouring
 
