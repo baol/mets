@@ -277,6 +277,42 @@ Consequences and review:
    clock: report cycles per second beside the result, as the paper's
    budgets are in cycles.
 
+*Result: retired (`reports/2026-11-06-q9-bls-tai50a.md`).* BLS on tai50a,
+single-threaded, 1 hour, 5 seeds: 0/5, gaps 0.24–0.47% (median 0.45%),
+about 5.1 M cycles per run. The baseline `memetic` under the same budget
+ties on 2 of 4 seeds so far (840 s, 3,065 s) and its misses sit at
+4,941,410 (0.05%). A miss of that size on every seed is not explained by
+the two known deviations or by the recalled parameters, so the direction
+is closed without checking them; `--method bls` and the BLS-rule
+perturbation stay in the code as documented negatives. What the two
+measurements say together: on tai-a the robust tabu search with a long
+aspiration is the engine, and the perturbation style around it matters
+little (Q2, Q9) against the aspiration age (Q6).
+
+### Q10. The aspiration effect on the CPU: a test of the explanation
+
+The Q6 reading says the long aspiration helps *because* a population of
+112 trajectories already diversifies. That predicts a smaller gain on a
+single trajectory or a population of 10. The alternative is simpler:
+Taillard's 5n² is just too short for tai-a at any population size. The
+two are separated on the CPU, without the GPU:
+* `qap_advanced`: expose `--tenure LO,HI` and `--aspiration X` for the
+  methods that use `RobustTabuSearch` (`memetic`, `restarts`); the fields
+  are public already. Also make it save its best permutation as
+  `NAME.best` through `common::fresh_path`, as `qap_gpu` does: the Q9
+  baseline ties could not be recounted, which §6.6 requires.
+* Run: `memetic`, single-threaded, 1 hour, seeds 1–5, aspiration 5n²
+  (the Q9 baseline, 2/4 so far; its seed 5 completes it) against 20n²
+  and off (1000). Then `restarts` (one trajectory at a time) at 5n² and
+  20n², same budget.
+* Decision: if 20n² lifts the single-threaded memetic from 2/5-ish to
+  5/5 with a median under 600 s, the explanation is wrong and the longer
+  aspiration becomes the default of both examples for all instances after
+  one structured instance agrees (sko100a, §0 rule); if the CPU gain is
+  small while the GPU's was 10×, the population is doing the
+  diversifying and the aspiration should scale with the population, not
+  with n alone.
+
 ## 2. Graph colouring
 
 ### A3. Finish the pending GPU runs (calibration, not records)
@@ -679,10 +715,12 @@ comparison if needed → Q6 tai60a, B and C (5 h), then the sko100a check
 tai80a, B and C at 60 minutes (10 h) → Q5.
 
 Sandbox queue while the GPU runs, in order:
-1. Q9: finish the tai50a run (5 seeds per arm, single-threaded), verify
-   every tie with `scripts/verify_qap.py`, report, and apply the decision
-   rule.
-2. A2 preparation: `coloring_gpu --cpu` host-loop checks on DSJC1000.5 at
+1. Q9 done (retired); the baseline's seed 5 completes the 5n² arm of Q10.
+   Q10: `qap_advanced --tenure/--aspiration`, solutions saved and
+   recounted, the memetic arms at 20n² and off, then `restarts`.
+2. A2 preparation (done, report in); A2.6 (8-bit conflict table) only if
+   the GPU smoke test asks for it.
+   A2 preparation, as it was: `coloring_gpu --cpu` host-loop checks on DSJC1000.5 at
    k = 82 and flat1000_76_0 at k = 81 (memory and occupancy in the start
    line, the 24-bit move index path, a few generations with `--trace`),
    and the two k values confirmed from a source the owner provides (the
