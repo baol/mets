@@ -594,3 +594,32 @@ fn directed_perturbation_adapts_and_does_not_undo_itself() {
     perm::directed_perturbation::<SortFull>(12).perturb(&mut f, &mut r);
     assert!(is_permutation(f.as_slice()) && f.cost() == f.evaluate());
 }
+
+/// A search that never moves: only a perturbation can change the solution.
+struct Idle;
+impl<S: Model, R: mets::rand::Rng> Search<S, R> for Idle {
+    fn step(&mut self, _: &mut State<S, R>, _: &mut dyn Observer<S, R>) -> Step {
+        Step::Stuck
+    }
+}
+
+#[test]
+fn a_perturbation_that_reaches_a_new_best_is_recorded_and_notified() {
+    // the perturbation sorts (the optimum); the inner search never moves, so
+    // the new best comes from the perturbation alone, which must still reach
+    // the observers (stopping at a target depends on it)
+    let mut st = State::new(Sort(reversed(8)), 1);
+    let mut seen = Vec::new();
+    IteratedSearch::new(
+        Idle,
+        Unlimited,
+        perturb_with(|s: &mut Evaluated<Sort>, _| s.modify(|p| p.0.sort())),
+        Always,
+    )
+    .runner(&mut st)
+    .until(MaxIterations::new(3))
+    .on_global_improvement(|st| seen.push(st.global_best().cost()))
+    .run();
+    assert_eq!(st.global_best().cost(), 0);
+    assert_eq!(seen, vec![0], "one global improvement, to the optimum");
+}

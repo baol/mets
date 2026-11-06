@@ -271,7 +271,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
         Method::Bls => {
             // a descent's many cheap moves: the plain model's O(1) swap fits it
             let mut st = State::new(QapPlain { inst, p: start }, seed);
-            IteratedSearch::new(
+            let out = IteratedSearch::new(
                 perm::SwapDescent::new(),
                 cancel,
                 perm::directed_perturbation::<QapPlain>(n),
@@ -281,6 +281,13 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
             .until(steps)
             .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
             .run();
+            // the BLS paper's budgets are in cycles (descent + perturbation)
+            let secs = out.elapsed.as_secs_f64();
+            eprintln!(
+                "bls seed {seed}: {} cycles in {secs:.1} s ({:.0} cycles/s)",
+                out.iterations,
+                out.iterations as f64 / secs.max(1e-9)
+            );
             st.global_best().cost()
         }
         Method::Ma => {

@@ -132,6 +132,8 @@ where
             });
         }
         obs.notify(Event::Restart, st);
+        // a perturbation can itself reach a new best (directed perturbations do)
+        st.record_current(obs);
 
         // 2. inner run with its own best
         let mut scope = st.scope();

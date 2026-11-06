@@ -308,6 +308,8 @@ where
             self.parent = Some(a);
         }
         obs.notify(Event::Restart, st);
+        // a fresh start or a child can itself be a new best
+        st.record_current(obs);
 
         // 2. improve it, with its own best
         let mut scope = st.scope();

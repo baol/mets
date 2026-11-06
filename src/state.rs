@@ -175,6 +175,20 @@ impl<S: Model, R> State<S, R> {
     /// Shared tail of `commit` and `replace_current`.
     fn after_move(&mut self, delta: S::Cost, obs: &mut dyn Observer<S, R>) -> Step {
         obs.notify(Event::Moved { delta }, self);
+        self.record(obs)
+    }
+
+    /// After [`modify_current`](Self::modify_current) (a perturbation, a
+    /// crossover): if the current solution is better than the best, record
+    /// it and notify `Improved` (and `GlobalImproved`) as a move would, so
+    /// that observers and stopping rules see a best reached by the change
+    /// itself. No `Moved` event: no move was made. Returns `Step::Improved`
+    /// if it recorded a new best.
+    pub fn record_current(&mut self, obs: &mut dyn Observer<S, R>) -> Step {
+        self.record(obs)
+    }
+
+    fn record(&mut self, obs: &mut dyn Observer<S, R>) -> Step {
         if !self.is_better(self.current.cost(), self.best.cost()) {
             return Step::Moved;
         }
@@ -198,7 +212,9 @@ impl<S: Model, R> State<S, R> {
     }
 
     /// Change the current solution arbitrarily (perturbation, restart). The
-    /// closure gets the RNG too. Records nothing and notifies no one.
+    /// closure gets the RNG too. Records nothing and notifies no one: call
+    /// [`record_current`](Self::record_current) afterwards if the change can
+    /// reach a new best.
     pub fn modify_current<T>(&mut self, f: impl FnOnce(&mut Evaluated<S>, &mut R) -> T) -> T {
         f(&mut self.current, &mut self.rng)
     }
