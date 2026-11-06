@@ -411,7 +411,32 @@ result cannot be wrong.
    a negative, `--table auto` prefers global 16-bit tables whenever the
    16-bit shared ones do not fit, and the 4-hour runs go on global
    tables. The lesson either way goes in DESIGN beside the DSJC500.5
-   kernel table: shared memory pays only while it leaves 2 blocks per SM. γ[v][c] counts v's neighbours of colour c; on these
+   kernel table.
+
+   *Settled (same report, builds ad135ed):* the block width was the
+   missing variable.
+
+   | table, threads per block | blocks resident | batch (s) | it/s | best at 600 s |
+   |---|---|---|---|---|
+   | 16-bit global, 128 | 252 | 11.3 | 1.2 M | 61 |
+   | 8-bit shared, 128 | 28 | 47 | 0.27 M | 72 |
+   | 8-bit shared, 512 | 28 | 10.6 → 8.1 | 1.27 → 1.50 M | 57 |
+   | 8-bit shared, 1024 | 28 | 7.8 → 5.6 | 1.73 → 2.19 M | 55 |
+
+   A2.6 is closed positive: 8-bit shared table at 1,024 threads, 1.8×
+   the global tables and 2.19 M it/s. Under the plan's 3 M, but the
+   remedy is spent, so the 4-hour calibration runs go at this setting,
+   as the researcher decided. Two follow-ups: (1) the setting must be the
+   default, not a pair of flags: `--table auto` already picks the 8-bit
+   table when the 16-bit one does not fit, and the thread count should
+   follow it (1,024 whenever one block per SM is all that fits, 128
+   otherwise), so that a long run without `--threads` cannot silently
+   run 4× slower; the start line keeps printing both. (2) The DESIGN
+   lesson, as the researcher phrased it: with one block per SM the block
+   must be as wide as the SM holds; a shared table pays with enough
+   warps behind it, not only while it leaves two blocks per SM. Batch
+   time falls through a run as the conflict lists shrink, on both
+   paths, so it/s figures from the log are bounds, as the report says. γ[v][c] counts v's neighbours of colour c; on these
    graphs it is around 6 and never near 255 in a near-legal colouring.
    An 8-bit table is n·k = 82 KB, and with the 8-bit colouring and the
    conflict list it fits the 99 KB opt-in at one block per SM. Saturate
@@ -831,11 +856,11 @@ is reported as "exploratory" and does not change a default.
 
 ## 7. Order of work
 
-GPU queue (one run at a time on the RTX 3060): A2 block-width test,
-`--table 8 --threads 512` and `1024` on DSJC1000.5 (10 min each) → Q6
-tai60a, B and C at 20n² (5 h), then the sko100a check (1 h) → A2
-calibration runs, 4 h each, on whichever table won → Q7 tai256c,
-cohesive, 4 h → Q6 tai80a, B and C at 60 minutes (10 h) → Q5.
+GPU queue (one run at a time on the RTX 3060): A2 calibration runs,
+DSJC1000.5 at 82 and flat1000_76_0 at 81, `--table 8 --threads 1024`,
+4 h each, and Q6 tai60a, B and C at 20n² (5 h), in whichever order the
+machine is free, then the sko100a check (1 h) → Q7 tai256c, cohesive,
+4 h → Q6 tai80a, B and C at 60 minutes (10 h) → Q5.
 
 Sandbox queue while the GPU runs, in order:
 1. Q9 done (retired); the baseline's seed 5 completes the 5n² arm of Q10.
