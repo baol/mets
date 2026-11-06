@@ -216,10 +216,13 @@ impl Instance {
     }
 }
 
+/// Routes, stated cost, and the precision the cost is written with.
+pub type Sol = (Vec<Vec<usize>>, Option<f64>, f64);
+
 /// A `.sol` file: routes of customers (1..n, as in the file), the stated
 /// cost, and the precision it is written with (half a unit of its last
 /// digit: Golden's files round to one decimal, CMT's to two).
-pub fn read_sol(path: &Path) -> Result<(Vec<Vec<usize>>, Option<f64>, f64), String> {
+pub fn read_sol(path: &Path) -> Result<Sol, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut routes = Vec::new();
     let (mut cost, mut precision) = (None, 0.0);
