@@ -1207,7 +1207,11 @@ random starts), 2 M more iterations of TabuCol end at 8.1 conflicts on
 average; 20 VSS rounds of 50,000 iterations per space end at 6.5, never
 worse on any seed, in 40–60% less time (PartialCol iterations are cheaper).
 `coloring --vss R` applies it to the runs of a failed k; `coloring_gpu
---vss-rounds R` after each polish, on the CPU threads.
+--vss-rounds R` after each polish, on the CPU threads. On the GPU it did
+not help where it was meant to: DSJC500.5 at 47 reaches 1 conflict in
+about half an hour with or without polish and VSS, and 52 VSS rounds from
+that 1-conflict solution over a 4-hour run removed nothing
+(`reports/2026-11-06-gpu-q6-sweep-and-a3.md`). Both stay off by default.
 
 **GPU (`examples/coloring_gpu.rs`, `--features gpu`).** HEAD runs as many
 independent pairs; each generation's children are improved in one batch by
