@@ -352,10 +352,14 @@ Decisions:
 clean on both graphs at k = 82 and 81; shared tables would need 163 KB,
 so the kernel takes its global-memory path, which has never run on the
 GPU and was 9× slower per batch on DSJC500.5. Directions:
-1. k values: my own recollection agrees with 82 (DSJC1000.5) and 81
-   (flat1000_76_0), both from Titiloye & Crispin's quantum annealing and
-   matched by HEAD; the owner confirms them from the HEAD paper's table
-   before the run, as the rule says.
+1. k values confirmed by the owner from the HEAD paper (Moalic &
+   Gondran, "Variations on Memetic Algorithms for Graph Coloring
+   Problems", arXiv:1401.2184, and the DIMACS instance table at
+   mat.tepper.cmu.edu/COLOR/instances.html): DSJC1000.5 at k = 82,
+   flat1000_76_0 at k = 81. These are the upper bounds HEAD reached; a
+   legal colouring at these k is a tie, at k − 1 a beat (flat1000_76_0's
+   planted colouring has 76, so 80 would be a tie with nothing known and
+   still above the construction).
 2. First GPU run is a 10-minute smoke test on DSJC1000.5 at 82: the
    start line (global tables, occupancy, device memory ≈ 109 MB),
    `mismatches=0` on every batch, and the batch time. Only then the two
