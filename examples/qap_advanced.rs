@@ -36,6 +36,8 @@
 //!   --crossover X  memetic / ma: uniform | path (path relinking half-way, DE-style) |
 //!                  cohesive (Drezner: one parent's elements on a ball of close positions;
 //!                  uniform on instances without a distance matrix) (default uniform)
+//!   --tenure LO,HI memetic / restarts: robust tabu tenure in [LO·n, HI·n] (default 0.9,1.1)
+//!   --aspiration X memetic / restarts: long-term aspiration after X·n² iterations (default 5)
 //!   --perturbation P  memetic / restarts: random (adaptive random swaps) | directed
 //!                  (Benlic & Hao's breakout local search) (default random)
 //!   --replacement Y  memetic: niche (closest member or worst) | parent (DE one-to-one) (default niche)
@@ -54,6 +56,8 @@
 //!   --max-seconds T  also stop each run after T seconds and report its best
 //!                  (results then depend on timing)
 //!   --markdown     --qaplib only: print a Markdown table
+//! A single instance's best permutation is saved as NAME.best (cost, then the 1-based
+//! element at each position), or the first free NAME.2.best, …
 
 #[path = "common/qap.rs"]
 mod common;
@@ -105,6 +109,10 @@ struct Settings {
     replace_parent: bool,
     /// memetic / restarts: the iterated tabu search's perturbation.
     perturbation: Perturb,
+    /// memetic / restarts: robust tabu tenure range (fractions of n) and
+    /// long-term aspiration age (multiple of n²).
+    tenure: (f64, f64),
+    aspiration: f64,
 }
 
 /// What a migrant does when it reaches an island.
@@ -165,13 +173,16 @@ fn improvement<'a>(
     n: usize,
     cancel: &'a Cancel,
     kind: Perturb,
+    set: &Settings,
 ) -> impl Search<QapTaillard<'a>> + 'a {
     let perturbation = match kind {
         Perturb::Random => Perturber::Random(adaptive_perturbation(n)),
         Perturb::Directed => Perturber::Directed(perm::directed_perturbation::<QapTaillard>(n)),
     };
+    let mut rots = RobustTabuSearch::new();
+    (rots.tenure, rots.aspiration) = (set.tenure, set.aspiration);
     IteratedSearch::new(
-        RobustTabuSearch::new(),
+        rots,
         NoImprovement::new((2 * n as u64).max(200)).or(cancel),
         perturbation,
         Improving,
@@ -201,9 +212,15 @@ impl<'a> Perturbation<QapTaillard<'a>> for Perturber<'a> {
     }
 }
 
-/// One run with seed `seed`; returns the best cost found. Cancels every run
-/// when `target` is reached.
-fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Settings) -> C {
+/// One run with seed `seed`; returns the best cost found and its
+/// permutation. Cancels every run when `target` is reached.
+fn run(
+    inst: &Instance,
+    seed: u64,
+    target: Option<C>,
+    cancel: &Cancel,
+    set: &Settings,
+) -> (C, Vec<usize>) {
     let n = inst.n;
     let fresh = || perturb_with(|s: &mut Evaluated<QapTaillard>, rng| shuffle(s, rng));
     let start = random_start(n, seed);
@@ -218,7 +235,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
         Method::Memetic => {
             let mut st = State::new(QapTaillard::new(inst, start), seed);
             let memetic = Memetic::new(
-                improvement(n, cancel, set.perturbation),
+                improvement(n, cancel, set.perturbation, set),
                 NoImprovement::new(20).or(cancel),
                 fresh(),
                 Recombiner::new(set.crossover, inst),
@@ -239,12 +256,12 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
                 .until(steps)
                 .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
                 .run();
-            st.global_best().cost()
+            (st.global_best().cost(), st.global_best().p.clone())
         }
         Method::Restarts => {
             let mut st = State::new(QapTaillard::new(inst, start), seed);
             IteratedSearch::new(
-                improvement(n, cancel, set.perturbation),
+                improvement(n, cancel, set.perturbation, set),
                 NoImprovement::new(20).or(cancel),
                 fresh(),
                 Always,
@@ -253,7 +270,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
             .until(steps)
             .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
             .run();
-            st.global_best().cost()
+            (st.global_best().cost(), st.global_best().p.clone())
         }
         Method::Lns => {
             // the rearrangement swaps a lot: the plain model's O(1) swap fits it better
@@ -266,7 +283,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
             .until(steps)
             .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
             .run();
-            st.global_best().cost()
+            (st.global_best().cost(), st.global_best().p.clone())
         }
         Method::Bls => {
             // a descent's many cheap moves: the plain model's O(1) swap fits it
@@ -288,7 +305,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
                 out.iterations,
                 out.iterations as f64 / secs.max(1e-9)
             );
-            st.global_best().cost()
+            (st.global_best().cost(), st.global_best().p.clone())
         }
         Method::Ma => {
             // many cheap moves: the plain model's O(1) swap fits it better
@@ -307,7 +324,7 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
             .until(steps)
             .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
             .run();
-            st.global_best().cost()
+            (st.global_best().cost(), st.global_best().p.clone())
         }
     }
 }
@@ -381,6 +398,15 @@ fn ma_islands(inst: &Instance, target: Option<C>, set: &Settings) -> Vec<C> {
 }
 
 fn solve(inst: &Instance, best_known: Option<C>, set: &Settings) -> Solved {
+    solve_with_best(inst, best_known, set).0
+}
+
+/// [`solve`], and the best run's permutation (none for `ma` islands).
+fn solve_with_best(
+    inst: &Instance,
+    best_known: Option<C>,
+    set: &Settings,
+) -> (Solved, Option<Vec<usize>>) {
     let target = best_known.filter(|_| set.stop_at_best);
     if set.crossover == Recombine::Cohesive {
         match inst.proximity() {
@@ -396,10 +422,11 @@ fn solve(inst: &Instance, best_known: Option<C>, set: &Settings) -> Solved {
             .into_iter()
             .min()
             .expect("at least one island");
-        return Solved {
+        let solved = Solved {
             found,
             to_found: Some(t0.elapsed().as_secs_f64()),
         };
+        return (solved, None);
     }
     let results = run_many(set.runs, set.jobs, |r, cancel| {
         (
@@ -407,15 +434,16 @@ fn solve(inst: &Instance, best_known: Option<C>, set: &Settings) -> Solved {
             t0.elapsed(),
         )
     });
-    let (found, at) = results
+    let ((found, perm), at) = results
         .into_iter()
         .map(|(_, x)| x)
-        .min_by_key(|(c, _)| *c)
+        .min_by_key(|((c, _), _)| *c)
         .expect("at least one run");
-    Solved {
+    let solved = Solved {
         found,
         to_found: Some(at.as_secs_f64()),
-    }
+    };
+    (solved, Some(perm))
 }
 
 fn main() {
@@ -473,6 +501,18 @@ fn main() {
             Some("directed") => Perturb::Directed,
             Some(x) => panic!("unknown perturbation {x:?} (random, directed)"),
         },
+        tenure: args.value::<String>("--tenure").map_or((0.9, 1.1), |t| {
+            let v: Vec<f64> = t
+                .split(',')
+                .map(|x| x.parse().expect("--tenure LO,HI"))
+                .collect();
+            assert!(
+                v.len() == 2 && 0.0 < v[0] && v[0] <= v[1],
+                "--tenure LO,HI with 0 < LO <= HI"
+            );
+            (v[0], v[1])
+        }),
+        aspiration: args.value("--aspiration").unwrap_or(5.0),
     };
     let args = args.0;
     let what = match set.method {
@@ -487,8 +527,13 @@ fn main() {
         }
     };
     let setup = format!(
-        "{what}, {} runs × {} steps, {} threads",
-        set.runs, set.steps, set.jobs
+        "{what}, {} runs × {} steps, {} threads; robust tabu tenure {:?}, aspiration {}n²; build {}",
+        set.runs,
+        set.steps,
+        set.jobs,
+        set.tenure,
+        set.aspiration,
+        env!("METS_GIT_HASH")
     );
 
     if let Some(i) = args.iter().position(|a| a == "--qaplib") {
@@ -519,7 +564,7 @@ fn main() {
         .get(1)
         .map(|s| read_sln(Path::new(s), &inst).unwrap_or_else(|e| panic!("{e}")));
     let t = Instant::now();
-    let s = solve(&inst, best_known.as_ref().map(|b| b.value), &set);
+    let (s, perm) = solve_with_best(&inst, best_known.as_ref().map(|b| b.value), &set);
     print!(
         "{setup}\n{dat}: n = {}, found {} in {:.1} s",
         inst.n,
@@ -533,6 +578,18 @@ fn main() {
             gap(s.found, b.value)
         ),
         None => println!(),
+    }
+    if let Some(p) = perm {
+        // the solution, recounted, in this run's own file
+        assert_eq!(inst.cost_of(&p), s.found, "the saved permutation's cost");
+        let name = Path::new(dat)
+            .file_stem()
+            .map_or("qap".into(), |x| x.to_string_lossy().into_owned());
+        let out = fresh_path(&name, "best");
+        let line: Vec<String> = p.iter().map(|&x| (x + 1).to_string()).collect();
+        std::fs::write(&out, format!("{}\n{}\n", s.found, line.join(" ")))
+            .unwrap_or_else(|e| panic!("{out}: {e}"));
+        println!("{dat}: saved to {out}");
     }
 }
 
@@ -559,6 +616,8 @@ mod tests {
                 crossover: Recombine::Uniform,
                 replace_parent: false,
                 perturbation: Perturb::Random,
+                tenure: (0.9, 1.1),
+                aspiration: 5.0,
                 stop_at_best: false,
             };
             assert_eq!(
@@ -587,6 +646,8 @@ mod tests {
             crossover: Recombine::Uniform,
             replace_parent: false,
             perturbation: Perturb::Random,
+            tenure: (0.9, 1.1),
+            aspiration: 5.0,
         };
         assert_eq!(ma_islands(&inst, None, &set), ma_islands(&inst, None, &set));
     }
@@ -609,6 +670,8 @@ mod tests {
             crossover: Recombine::Uniform,
             replace_parent: false,
             perturbation: Perturb::Random,
+            tenure: (0.9, 1.1),
+            aspiration: 5.0,
             stop_at_best: true,
         };
         let found = solve(
