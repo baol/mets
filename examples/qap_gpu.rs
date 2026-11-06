@@ -20,8 +20,8 @@
 //!   --crossover X    uniform | cohesive (Drezner: one parent's elements on a ball of
 //!                    close positions; uniform without a distance matrix) (default uniform)
 //!   --independent    Q6 arm B: no crossover; every member is an independent robust tabu
-//!                    trajectory, each batch continuing where the last stopped (the GPU
-//!                    keeps each member's tabu memory; the CPU path starts a fresh one)
+//!                    trajectory, each batch continuing where the last stopped, with its
+//!                    tabu memory (on the GPU and on the CPU path)
 //!   --perturb-stalled  Q6 arm C (implies --independent): after a batch that did not
 //!                    improve a member's best, k random swaps on it, k uniform in [n/10, n/4]
 //!   --tenure LO,HI   tabu tenure drawn in [LO·n, HI·n] (default 0.9,1.1)
@@ -83,7 +83,8 @@ trait Improver {
     /// `cur[i]` is the final position; `best[i]` and `best_cost[i]` are
     /// replaced when the run beats `best_cost[i]`. With `resume`, a member
     /// keeps its tabu memory from the previous call, whose iterations ended
-    /// at `it0` (the GPU does; the CPU path starts a fresh memory).
+    /// at `it0` (iteration count and tabu table carry over, on the GPU and
+    /// on the CPU path alike).
     #[allow(clippy::too_many_arguments)]
     fn advance(
         &mut self,
@@ -108,11 +109,28 @@ trait Improver {
     fn name(&self) -> String;
 }
 
-/// The library's robust tabu search on the CPU threads.
+/// The library's robust tabu search on the CPU threads. Each member keeps
+/// its `State` and its `RobustTabuSearch` between calls, so a resumed call
+/// continues the same trajectory with the same tabu memory, as the kernel
+/// does.
 struct CpuRots<'a> {
     inst: &'a Instance,
     jobs: usize,
     params: RotsParams,
+    members: Vec<Option<Member<'a>>>,
+}
+
+type Member<'a> = (State<QapTaillard<'a>>, perm::RobustTabuSearch);
+
+impl<'a> CpuRots<'a> {
+    fn new(inst: &'a Instance, jobs: usize, params: RotsParams) -> Self {
+        CpuRots {
+            inst,
+            jobs,
+            params,
+            members: Vec::new(),
+        }
+    }
 }
 
 impl Improver for CpuRots<'_> {
@@ -123,25 +141,47 @@ impl Improver for CpuRots<'_> {
         best_cost: &mut [C],
         iters: u64,
         _it0: u64,
-        _resume: bool,
+        resume: bool,
         seed: u64,
     ) {
         let chunk = cur.len().div_ceil(self.jobs.max(1)).max(1);
         let (inst, params) = (self.inst, self.params);
+        self.members.resize_with(cur.len(), || None);
         std::thread::scope(|scope| {
-            for (c, ((cs, bs), costs)) in cur
+            for (c, (((cs, bs), costs), ms)) in cur
                 .chunks_mut(chunk)
                 .zip(best.chunks_mut(chunk))
                 .zip(best_cost.chunks_mut(chunk))
+                .zip(self.members.chunks_mut(chunk))
                 .enumerate()
             {
                 scope.spawn(move || {
-                    for (i, ((p, b), cost)) in cs.iter_mut().zip(bs).zip(costs).enumerate() {
+                    for (i, (((p, b), cost), m)) in
+                        cs.iter_mut().zip(bs).zip(costs).zip(ms).enumerate()
+                    {
                         let run_seed = seed.wrapping_mul(1 << 20) + (c * chunk + i) as u64;
-                        let mut st = State::new(QapTaillard::new(inst, p.clone()), run_seed);
-                        let mut rots = perm::RobustTabuSearch::new();
-                        (rots.tenure, rots.aspiration) = (params.tenure, params.aspiration);
-                        rots.runner(&mut st).until(MaxIterations::new(iters)).run();
+                        let continuing = resume && m.is_some();
+                        if !continuing {
+                            let mut rots = perm::RobustTabuSearch::new();
+                            (rots.tenure, rots.aspiration) = (params.tenure, params.aspiration);
+                            *m = Some((
+                                State::new(QapTaillard::new(inst, p.clone()), run_seed),
+                                rots,
+                            ));
+                        }
+                        let (st, rots) = m.as_mut().expect("member");
+                        if continuing && st.current().p != *p {
+                            // the host moved this member (a perturbation): same tabu memory
+                            st.modify_current(|s, _| {
+                                *s = Evaluated::new(QapTaillard::new(inst, p.clone()))
+                            });
+                        }
+                        let runner = rots.runner(st).until(MaxIterations::new(iters));
+                        if continuing {
+                            runner.resume();
+                        } else {
+                            runner.run();
+                        }
                         p.clone_from(&st.current().p);
                         if st.global_best().cost() < *cost {
                             *cost = st.global_best().cost();
@@ -1123,11 +1163,7 @@ fn main() {
     }
     let setup = Instant::now();
     let mut improver: Box<dyn Improver> = if cpu {
-        Box::new(CpuRots {
-            inst: &inst,
-            jobs,
-            params,
-        })
+        Box::new(CpuRots::new(&inst, jobs, params))
     } else {
         gpu_improver(&inst, population, threads, params)
     };
@@ -1193,6 +1229,11 @@ fn main() {
                 rng.random(),
             );
             trace.batch(generation, &inst, &bests, &costs, t.elapsed().as_secs_f64());
+            // a member's best can only improve, on either path (a kernel bug otherwise)
+            assert!(
+                costs.iter().zip(&before).all(|(c, b)| c <= b),
+                "a member's best got worse across a resumed batch"
+            );
             let i = (0..population)
                 .min_by_key(|&i| costs[i])
                 .expect("population");
