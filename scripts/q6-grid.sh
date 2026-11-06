@@ -19,7 +19,7 @@
 #   SEEDS      [1 2 3 4 5]
 #   MINUTES    budget per run [60]
 #   SWEEP=1    instead of the grid: the aspiration sweep on tai50a, arm B,
-#              aspiration 2, 5, 10 (n^2), SEEDS seeds each
+#              at each level of ASPIRATIONS (n^2) [2 5 10], SEEDS seeds each
 #   EXTRA      more qap_gpu flags for every run (e.g. "--threads 256")
 #   CPU=1      dry run without a GPU: build without the gpu feature, add --cpu
 #
@@ -63,7 +63,7 @@ run() { # instance arm-label seed flags...
 }
 
 if [[ "${SWEEP:-0}" == 1 ]]; then
-    for asp in 2 5 10; do
+    for asp in ${ASPIRATIONS:-2 5 10}; do
         for s in "${seeds[@]}"; do
             run tai50a "B-asp$asp" "$s" --independent --aspiration "$asp"
         done
