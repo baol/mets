@@ -270,108 +270,157 @@ recount is a sum over edges.
 
 ### P7. CVRP: the Cordeau & Maischberger parallel iterated tabu search
 
-**Start from** Cordeau & Maischberger, "A parallel iterated tabu search
+**Source.** Cordeau & Maischberger, "A parallel iterated tabu search
 heuristic for vehicle routing problems", Computers & Operations Research
-39(9), 2012, 2033–2050 (DOI 10.1016/j.cor.2011.09.021; INOC 2011 and
-CIRRELT 2010-04 versions), which wraps the unified tabu search of Cordeau,
-Laporte & Mercier (JORS 2001) in an iterated search and runs it on several
-cores. It covers the VRP, the periodic, multi-depot and site-dependent
-variants, and their time-window versions. The paper's full text was not
-reachable from this sandbox (ScienceDirect, Semantic Scholar and CIRRELT
-are outside the network policy), so the design below follows the UTS
-lineage and the paper's abstract; every point marked *(check)* must be
-confirmed against the paper before coding, and the paper's own tables are
-the baseline the port has to reproduce.
+39(9), 2012, 2033–2050. It was coded on COIN-OR METSlib, so this is the
+crate's ancestor brought back: the port is the validation of `mets` on
+the problem it was designed for. The method below is taken from the
+paper's §2–3; nothing is left to check.
 
-**The method, as the port should state it.**
-* Solution: a set of routes, one per vehicle; for the variants, also the
-  depot or visit pattern of each customer.
-* Relaxed constraints: capacity, route duration (and time windows) are
-  violated at a price: cost = distance + α·excess load + β·excess duration
-  (+ γ·lateness). After every iteration each weight is multiplied by 1 + δ
-  if its constraint is violated and divided by 1 + δ otherwise (δ = 0.5 in
-  UTS; *check*).
-* Neighbourhood: remove a customer from its route and insert it in another
-  route at the position that minimises cost (UTS used GENI insertion; the
-  2012 paper's insertion and any intra-route improvement after a move:
-  *check*).
-* Tabu: the attribute (customer i, route k) is forbidden for θ iterations
-  after i leaves k (θ = 7.5 log₁₀ n in UTS; *check*), with aspiration when
-  the move beats the best solution seen with that attribute.
-* Continuous diversification: non-improving moves pay λ·c̄·√(n·m)·ρᵢₖ, where
-  ρᵢₖ is how often attribute (i, k) has been added so far and c̄ the mean
-  arc cost (λ = 0.015 in UTS; *check*).
-* Iteration: a tabu phase of a fixed number of iterations, then a
-  perturbation of the best solution of the phase, then the next phase
-  (perturbation operator and strength, and the acceptance rule between
-  phases: *check*; a citing paper describes operator selection
-  probabilities updated by success, which may be the INOC version).
-* Parallel: several threads run the iterated search with different seeds
-  (and, *check*, different parameter settings), sharing at most the best
-  solution.
+**The method (sequential, §2).**
+* *Routes and insertion.* Problems without time windows use GENI
+  insertion and removal (Gendreau, Hertz & Laporte) with a neighbourhood
+  of size q around the customer; with time windows, plain best insertion
+  between two consecutive customers and removal by reconnection, with the
+  route's duration minimised by forward time slack.
+* *Initial solution.* Sweep: customers sorted by angle around the depot,
+  inserted one by one into the current route, a new route opened when
+  capacity or duration would be violated while vehicles remain; so the
+  first m − 1 routes are feasible.
+* *Objective.* f(s) = c(s) + α·q(s) + β·d(s) + γ·t(s): cost plus capacity,
+  duration and time-window violations. α, β, γ start at 1; at the end of
+  every tabu iteration each is multiplied by 1 + δ if its constraint is
+  violated, divided by 1 + δ otherwise. δ is drawn uniformly in [0, 1] at
+  the start of each improvement phase.
+* *Attributes and moves.* A solution is its attribute set B(s) of triples
+  (i, k, l): customer i served by vehicle k on day l. A move (R, R′)
+  replaces attributes R by R′: either relocate a customer to another route
+  on the same day (GENI insertion at least cost in g), or change its visit
+  combination (remove it from the days dropped, insert it on the days
+  added). Both neighbourhoods are explored in full; the best non-tabu move
+  by g(s′) is taken.
+* *Tabu and aspiration.* After (R, R′), the attributes in R \ R′ (what the
+  customer left) are tabu for τ iterations; τ is drawn uniformly from the
+  integers [0, ⌈√(n·m·t)⌉] at the start of each phase. Aspiration: a tabu
+  move is allowed if f(s′) is below the best cost ever seen for at least
+  one attribute of B(s′).
+* *Diversification.* At a local minimum, non-improving moves are scored
+  g(s′) = f(s′)·(1 + ζ·Σ_{(i,k,l)∈R′\R} r_ikl / λ), with r_ikl the number
+  of times the attribute has been added since the start, λ the current
+  iteration number, ζ uniform in [0, 1] per phase.
+* *Route refinement.* Every 200 tabu iterations, each route is rebuilt by
+  removing and reinserting each of its customers in turn (GENI with q
+  doubled; with time windows, in random customer order).
+* *Tabu stop.* A phase ends when s* has not improved for
+  μ = √((η − λ)·π) consecutive iterations: long phases early, short ones
+  late, longer after a big perturbation. η is the total tabu-iteration
+  budget of the whole run (10⁵ or 10⁶ in the paper), π the current
+  perturbation size.
+* *Perturbation* (cluster removal, after Pisinger & Ropke): a random seed
+  customer and its π closest customers, π uniform in [0, ⌈√n⌉], are
+  removed; each gets a random visit combination from C_i; they are
+  reinserted one by one in random order at least cost c(s).
+* *Acceptance.* Any improvement replaces s*. The phase's final working
+  solution s̃ (the last visited, not the best) is kept with probability
+  1 − (λ/η)², otherwise the search returns to s*: broad early, converging
+  late.
+* *Stop.* η tabu iterations in total, whatever the number of phases.
 
-**Mapping to `mets`, and what the library lacks.**
-1. `examples/common/vrp.rs`: `Instance` reader for the CVRPLIB/TSPLIB
-   `.vrp` format (the X, XL, Golden and CMT sets are all distributed in it,
-   with `.sol` files), `Routes` model with per-route load, length and a
-   position index, `Cost = f64`, penalty weights *inside the model* so
-   `evaluate()` is the penalised cost.
-2. `Relocate { customer, route, position }` as a `Move` with an O(1) delta
-   from three arcs and the two routes' load and duration changes;
-   `RelocateNeighborhood` scans, per customer, the best position in every
-   other route (O(n²) per iteration), with a granular option (Toth & Vigo:
-   insert only next to one of the k nearest neighbours, O(n·k)).
-3. Tabu status: `RecencyTabu` over the attribute key (i, k) fits
-   `TabuAttr` as it is. The per-attribute aspiration needs a custom
-   `Aspiration` (the trait exists).
-4. **Library addition: selection score separate from cost delta.** The
-   diversification penalty changes which move is *chosen* but not the cost
-   the move *applies*; today a `Neighborhood` can only report the true
-   delta or corrupt the cache. Add `TabuSearch::with_score(|s, m, delta|
-   score)` (applied before tabu/aspiration tests, with the real delta kept
-   for `apply`); frequencies ρᵢₖ live in the closure's state, updated from
-   `on_move`. The same hook gives guided local search for free.
-5. **Library addition: a per-step hook with `&mut State`.** The penalty
-   weights change every iteration and the cached cost must follow
-   (`Evaluated::resync`). Observers see `&State` only (DESIGN §6, reactive
-   tabu). Add `Adjusting<I, F>`: a `Search` that runs `inner.step()` then
-   `f(&mut st)`; it also closes the reactive-tabu open point.
-6. The iterated layer is `IteratedSearch` with a relocation-based
-   `Perturbation` (random relocations, strength from `Adaptive`) and the
-   paper's acceptance; the parallel layer is `parallel::run_many` with one
-   configuration per thread. `examples/cvrp.rs` wires it with `--jobs`,
-   `--phase-iters`, `--granular K`, `--max-seconds`, and writes
-   `NAME.sol` in CVRPLIB's format.
-7. `examples/verify_vrp.rs`: recompute distance and feasibility of a
-   `.sol` against the `.vrp` with none of the solver's code (CVRPLIB
-   rounds Euclidean distances to the nearest integer for the X set and uses
-   real distances for CMT/Golden: get this right first, or every gap is
-   wrong).
+**The parallel scheme (§3; pC/KS/MPDS in Crainic's taxonomy).** N
+processes, each with its own seed, initial solution and its own δ, ζ, τ;
+π and μ are synchronised so phases end together. At the end of a phase
+process p keeps s̃_p with probability 1 − (λ/η)², else restarts from the
+j-th best s* over all processes with j = ⌊√p⌋ (also tried: p − 1, p/2,
+√N − √p; √p balanced breadth and depth best). Before perturbing, with
+probability 0.1 a process applies a crossover: the cluster removal with
+the removed customers' visit combinations copied from another process's
+solution chosen uniformly, cluster size in [0, 4⌈√n⌉]. Boost::MPI; 8 and
+64 processes at 125,000 iterations each.
 
-**Measure.** (1) Reproduce the paper: CMT 1–14 and Golden 1–20, the
-paper's thread count and time limit, 5 seeds; the port passes when its
-mean gaps are within the paper's reported spread (*take the table from the
-paper*). This is the acceptance test of the port and of the two library
-additions. (2) Position against today: X instances n ≤ 500, 10 runs,
-the HGS budget of Vidal (2022) (n·2.4 s on their CPU; state ours), gap to
-the CVRPLIB best known. Expect to lose to HGS; the question is by how much
-and where (large n, tight capacity, clustered depots). (3) Variants in the
-paper's order (MDVRP on Cordeau's instances, PVRP, SDVRP), each reusing the
-same model with the attribute widened to (customer, depot) or (customer,
-pattern).
+**Results to reproduce (Table 1, Table 9; one process unless stated).**
 
-**Where a record is plausible.** Not on CMT, Golden or X (61 of 100 X
-instances are proven optimal and the last new X value dates from June
-2021). The XL set (100 instances, 1,000–10,000 customers, January 2026)
-is where values move: 69 new best knowns in the challenge's first two
-days. At that size the costs are the O(n²) neighbourhood and the
-population memory, which is exactly what the GPU pattern of `qap_gpu`
-addresses: one block per solution, threads over customers for the
-relocation scan, granular neighbour lists in shared memory. Do the GPU
-version only after (1) and (2) hold on the CPU; then run XL instances at
-the challenge's time limits and submit through CVRPLIB, which verifies
-independently. Confirm first that the site still accepts submissions after
-the challenge window (it was not reachable from here).
+| set | ITS avg, η = 10⁵ | ITS avg, η = 10⁶ | ITS best of 10, η = 10⁶ | NB09 avg / best | time ITS 10⁵ / 10⁶ |
+|---|---|---|---|---|---|
+| CMT (14) | 0.60% | 0.27% | 0.07% | 0.03% / 0.00% | 188 s / 1,877 s |
+| Golden (20) | 1.30% | 0.79% | 0.41% | 0.12% / 0.02% | (same runs) |
+
+Times on a 2.93 GHz Xeon X7350, 10 runs per instance. On the variants
+the parallel version found new best knowns (PVRP 3 new + 24 ties of 42;
+SDVRP 16 new + 17 ties of 35; several on PVRPTW, MDVRPTW, SDVRPTW) and
+the gap on pr05 falls from 0.74% at N = 8 to ≈ 0.05% at N = 80 at a
+fixed 125,000 iterations per process (Fig. 2), with time growing only
+about 25% per tripling of N (Fig. 3). That curve is the research
+argument of this direction: the paper stopped at 80 processes for lack
+of hardware, and a GPU offers a thousand.
+
+**Mapping to `mets`.**
+1. `examples/common/vrp.rs`: `.vrp` reader (CVRPLIB/TSPLIB format: the
+   X, XL, Golden and CMT sets all come in it, with `.sol`), with the
+   instance's distance convention (CMT/Golden real-valued Euclidean, X
+   rounded to integers: get this right first). `Routes` model: per-route
+   sequence, load, length; a position index; α, β (γ later) *inside the
+   model* so `evaluate()` is f(s); `Cost = f64`.
+2. Insertion. Start with the paper's time-window mechanism (best insertion
+   between consecutive customers, removal by reconnection) on all
+   problems, and the route refinement as an Or-opt/2-opt pass (T1 moves):
+   it is the paper's own simpler variant, and it decides whether GENI is
+   needed. GENI (types I and II, neighbourhood q) is the second step, done
+   only if the CMT gaps stay above the table at equal η.
+3. `Relocate { customer, route, position }` as a `Move` with an O(1) delta
+   (three arcs plus the two routes' load and duration terms);
+   `RelocateNeighborhood` visits, per customer, the best position in every
+   other route; a granular option (k nearest neighbours) for n ≥ 1,000.
+4. Tabu status: `RecencyTabu` keyed by `TabuAttr::key = (i, old route)`
+   (the attribute in R \ R′) is exactly the paper's rule. The tenure
+   redraw per phase goes in `TabuList::start`.
+5. Aspiration: a custom `Aspiration` holding `best_with[(i, k)]`, the
+   best f over visited solutions containing the attribute; `allows` tests
+   `new_cost < best_with` over the attributes of s′ (the moved customer's
+   new attribute suffices, the others are unchanged by the move and
+   already in B(s)). The table is updated after each move by the per-step
+   hook below.
+6. **Library addition: `TabuSearch::with_score(|st, m, delta| score)`.**
+   g(s′) changes which move is chosen, not the cost that is applied;
+   today a neighbourhood can only report the true delta or corrupt the
+   cache. The closure sees f(s′) = cost + delta and keeps r_ikl and λ in
+   its state. General: frequency diversification and guided local search.
+7. **Library addition: `Adjusting<I, F>`**, a `Search` that runs
+   `inner.step()` then `f(&mut st)`: the α/β update every iteration (then
+   `Evaluated::resync`), the aspiration table update, the route
+   refinement every 200 iterations, and the frequency counts. It also
+   closes DESIGN §6's reactive-tabu point.
+8. The ILS loop is written in the example, not with `IteratedSearch`: its
+   acceptance, stop rule and parallel synchronisation all read λ, η and π.
+   Per phase: draw δ, ζ, τ; `TabuSearch` runner with `stop_when(no
+   improvement for μ)`; acceptance by 1 − (λ/η)²; cluster perturbation
+   (`Perturbation` impl, reusable). Parallel: `std::thread::scope`, one
+   process per thread, a barrier at phase end, the sorted s* list and the
+   ⌊√p⌋ rule, crossover with probability 0.1.
+9. `examples/cvrp.rs` flags: `--eta`, `--jobs N`, `--insertion
+   best|geni`, `--granular K`, `--max-seconds`; writes `NAME.sol` in
+   CVRPLIB's format. `examples/verify_vrp.rs` recomputes cost and
+   feasibility of a `.sol` from the `.vrp` with none of the solver's code.
+
+**Measure.** (1) CMT 1–14 and Golden 1–20, η = 10⁵ then 10⁶, 10 runs: the
+port is accepted when its average gaps are at or below Table 9's
+(0.60/1.30% and 0.27/0.79%) at equal η; iteration counts make this
+machine-independent, and wall time per 10⁵ iterations is reported beside
+the paper's 188 s. (2) The parallel scheme at N = 4 (sandbox) and the
+pr05 curve of Fig. 2 at N = 8 on the user's machine. (3) X instances,
+n ≤ 500, against the CVRPLIB best known and the published HGS gaps:
+expect to lose; record by how much and where.
+
+**Research direction: Fig. 2 at N = 1,000.** The parallel scheme is the
+`qap_gpu` pattern exactly: one block per process, a phase of tabu
+iterations as the batch, acceptance, ranking and crossover on the host.
+Costs per block: the routes (n bytes), loads and lengths, a tabu table
+over (i, k) (n·m entries of 32 bits: 2 MB for n = 1,000, m = 100 in
+global memory), and the relocation scan parallel over customers with
+granular neighbour lists in shared memory. Measure on pr05 (the paper's
+curve), then on the X set, then on the XL set (1,000–10,000 customers,
+January 2026), the one CVRP benchmark where best knowns still move and
+where a thousand cooperating processes is a new regime, not a rerun.
+Submit any new value through CVRPLIB, which verifies independently.
 
 ### P5. Graph partitioning (Walshaw's archive)
 
@@ -429,9 +478,9 @@ is reported as "exploratory" and does not change a default.
    both are mostly GPU time, and both settle claims already in DESIGN.
 2. Q7 tai256c: first use of the global-memory kernel, realistic beat.
 3. Q6 tai-a arms on the GPU, with the RoTS parameter sweep first.
-4. P7 CVRP: port of the Cordeau & Maischberger heuristic, with the two
-   library additions it needs; acceptance test = the paper's CMT and
-   Golden tables.
+4. P7 CVRP: port of the Cordeau & Maischberger heuristic (best insertion
+   first, GENI if needed), with the two library additions it needs;
+   acceptance test = Table 9's CMT and Golden gaps at equal η.
 5. P1 flowshop: new problem class, maximal reuse, moving records.
 6. T1/T2 TSP primitives and example, capped at the T2 targets (Or-opt
    also serves P7's intra-route improvement).
