@@ -6,3 +6,4 @@ graph-coloring-instances/
 *.log
 *.sol
 nohup.out
+__pycache__/
