@@ -896,6 +896,60 @@ threads. `&Cancel` is a termination criterion: one run calling
 searches included if they observe it too, and runs not started yet are
 skipped.
 
+### 3.16 A worked example: the CVRP iterated tabu search
+
+`examples/cvrp.rs` ports Cordeau & Maischberger's (2012) iterated tabu
+search, which was first written on the C++ METSlib. It is the example
+that uses most of the tabu machinery at once, and the reason for two
+additions:
+
+```rust
+// a score that ranks moves without changing the cost that is applied
+TabuSearch::new(InterRoute::new(geni_p), DenseTabu::new(Tenure::Random(0..=tau)))
+    .with_aspiration(AttributeAspiration(mem.clone()))
+    .with_score(move |s: &Evaluated<Routes>, mv: &Relocate, delta: f64| {
+        if delta < 0.0 { return delta; }                     // improving: unpenalised
+        let r = freq[mv.c * s.m + mv.to] as f64;             // times (c, route) was added
+        (s.cost() + delta) * (1.0 + zeta * r / lambda) - s.cost()
+    });
+// per-iteration bookkeeping that may change how the model evaluates
+adjusting(tabu, |st: &mut State<Routes>, _: Step| {
+    /* frequencies, aspiration table, best feasible, then: */
+    st.modify_current(|e, _| e.modify(|r| { r.penalties.capacity *= 1.0 + delta; /* or ÷ */ }));
+});
+```
+
+* **`with_score`** (`tabu::Score`, default `NoScore`). The frequency
+  penalty g(s′) changes which move is chosen, not the cost the move
+  produces. Before, a neighbourhood could only report the true delta or
+  corrupt the cost cache. A score that is not the delta switches off
+  bound-based pruning (`Score::IS_DELTA`). The same hook serves guided
+  local search and any long-term frequency diversification.
+* **`Adjusting`** (`search::adjusting(inner, |st, step| ..)`) runs one
+  inner step and then the closure with `&mut State`. Here it multiplies
+  or divides the capacity and duration weights by 1 + δ every
+  iteration. The weights live inside the model, so `evaluate()` is f(s),
+  and `modify_current` re-evaluates. Every 200 iterations it also runs
+  the route refinement. It closes the reactive tabu point of §6: a hook
+  with `&mut` access to the state.
+* **Attribute tabu and aspiration**, with no new library code. The
+  attribute is (customer, route), as `TabuAttr::key = c·m + to` with
+  `reverse_key` the route the customer leaves, so `DenseTabu` forbids
+  putting it back. The aspiration is a user `Aspiration` that allows a
+  tabu move when f(s′) beats the best f seen with the move's new
+  attribute. The table it reads is updated in the `Adjusting` hook.
+* **GENI** (`examples/common/geni.rs`, `--insertion geni`), Gendreau, Hertz
+  & Laporte's insertion types I and II, is a pure function of one route's
+  sequence. So the neighbourhood caches each customer's best insertion
+  per route under a per-route version number, and a move recomputes two
+  routes, not m.
+
+The phase loop (stop after μ = √((η − λ)·π) iterations without
+improvement, acceptance with probability 1 − (λ/η)², cluster
+perturbation) is written in the example rather than with
+`IteratedSearch`: all three rules read the global iteration count λ and
+budget η.
+
 ---
 
 ## 4. Performance
@@ -1230,6 +1284,36 @@ k = 48, a batch of 128 runs × 5,000 iterations:
 10 M iterations/s is about 30 of the 4-core sandbox's cores; a legal
 48-colouring took 12.9 s. Every recount matched across all test runs.
 
+### Vehicle routing (CMT and Golden)
+
+`examples/cvrp.rs` (§3.16) on the 14 CMT and 20 Golden instances, with
+real-valued Euclidean distances as in the paper. Gaps are to the CVRPLIB
+best known, and every saved solution is recounted by
+`scripts/verify_vrp.py`, which shares no code with the solver. The
+fleet is the reference solution's routes plus one spare vehicle.
+Insertion is plain best insertion, and route refinement is 2-opt and
+Or-opt. Iterations are the unit, because the paper's machine differs.
+
+| set, η tabu iterations | ours | paper (Table 9, ITS) |
+|---|---|---|
+| CMT 1–14, 10⁵, 10 seeds | **0.50%** | 0.60% |
+| CMT 1–14, 10⁶, 10 seeds | **0.26%** | 0.27% |
+| Golden 1–20, 10⁵, 1 seed | 2.10% | 1.30% |
+| Golden 1–20, 10⁶, 1 seed | 1.37% | 0.79% |
+
+* **CMT:** the port matches the paper at both budgets, so it is
+  accepted there. The residual is CMT5, 10 and 13, at about 1% each.
+* **Golden:** the gap falls by ×0.65 from 10⁵ to 10⁶, against the
+  paper's ×0.61. The search dynamics scale like the paper's, so the
+  deficit points to the neighbourhood: the paper uses GENI insertion.
+* **Speed:** plain insertion runs 10⁵ iterations in 1–15 s on CMT on one
+  sandbox core; the paper reports 188 s on average. GENI costs about
+  100× per iteration on CMT, which is the paper's cost scale.
+
+The Golden comparison with GENI is in
+`reports/2026-11-06-p7-acceptance-and-diagnostics.md` and the reports
+after it.
+
 The C++ benchmark source is not committed. It is a 40-line program that
 includes `metslib/mets.hh`, and can be added to METSlib's `test/` if useful.
 
@@ -1280,9 +1364,10 @@ which the compiler or ergonomics forced:
   in an LNS loses to tabu search (§4). It may do better as an intensification
   step (applied to the best solution of each inner run) or as the
   perturbation of an iterated search; neither is measured yet.
-* **Reactive tabu search**: observers get `&State` only. Changing the tenure
-  from an observer would need `&mut` access to the algorithm. A user loop
-  that calls `step` directly already allows it.
+* **Reactive tabu search**: observers get `&State` only. `Adjusting`
+  (§3.16) gives a per-step hook `&mut State`, which covers penalty weights
+  inside the model. A tenure that reacts still needs `&mut` access to the
+  tabu list, which the hook does not have.
 * **Naming / packaging**: crate name (`mets`? `metslib`?) and whether to
   publish on crates.io. The license follows the C++ library (GPL-3.0-or-later
   or CPL-1.0, see `COPYING` and `COPYING-CPL`).
