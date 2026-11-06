@@ -127,14 +127,19 @@ tai30a reach the optimum with clean recounts. GPU run pending. Review:
    member's tabu state; the loop asserts no member's best worsens across a
    batch; 2,546 resumed batches on tai30a clean).
 
-*Sweep result (RTX 3060, tai50a, arm B, 112 trajectories, 200n per
-batch, 5 seeds, 1 hour each).*
+*Sweep result (RTX 3060, build 2a5f085, tai50a, arm B, 112 trajectories,
+200n per batch, 5 seeds, 30 minutes each; every trace clean, all 15
+`.best` files recounted; `reports/2026-11-06-gpu-q6-sweep-and-a3.md`).*
 
-| aspiration | best at 5 min (median) | reached | time to best known, reached seeds only (median, max) |
-|---|---|---|---|
-| 2n² | 4,953,480 | 3/5 | 493 s, 658 s |
-| 5n² | 4,941,410 | 4/5 | 403 s, 575 s |
-| 10n² | 4,941,410 | 5/5 | 355 s, 1,549 s |
+| aspiration | best at 5 min (median) | reached | time to best known by seed (s) | median, max |
+|---|---|---|---|---|
+| 2n² | 4,953,480 | 3/5 | 493, 658, —, —, 246 | 493 s, 658 s |
+| 5n² | 4,941,410 | 4/5 | 418, —, 389, 59, 575 | 403 s, 575 s |
+| 10n² | 4,941,410 | 5/5 | 1,549, 235, 355, 484, 105 | 355 s, 1,549 s |
+
+(—: ended at 4,941,410 after 1,800 s.) Every run that reached the best
+known did so in under 26 minutes on the GPU, against one 4-core `memetic`
+tie in the sandbox (756 s) and none of the `qap_gpu --cpu` runs.
 
 Reading: the medians of the time to target are over the seeds that
 reached it, so 493 s for 2n² is not "faster than 10n²"; the reach count
@@ -151,9 +156,9 @@ Decisions:
   10"`); the GPU default stays Taillard's 5n² until a second instance
   agrees (§0 rule).
 * The best level was the edge of the sweep, so one more level: B at 20n²
-  on tai50a, 5 seeds, same budget. If 20n² also reaches 5/5 with a lower
-  median than 10n², extend once more; if its reach count drops, 10n² is
-  settled.
+  on tai50a, 5 seeds, same 30-minute budget (`ASPIRATIONS=20 SWEEP=1`).
+  If 20n² also reaches 5/5 with a lower median than 10n², extend once
+  more; if its reach count drops, 10n² is settled.
 * The five B-asp10 runs are arm B on tai50a: run only `ARMS="A C"` there
   (10 GPU-hours). The question tai50a then answers is A against B: if the
   population at 10n² does not reach 5/5 with a median under 355 s, the
@@ -254,6 +259,30 @@ a current source (Hao's group's tables or the HEAD paper) before the run,
 not from memory. A tie on DSJC1000.5 and C2000.5 within hours would show
 the GPU population is at HEAD's level; nothing is attempted at k − 1 before
 that.
+
+*A1.8 done, negative (RTX 3060, build 26c75d3, 4 hours, 12,415 clean
+batches; `reports/2026-11-06-gpu-q6-sweep-and-a3.md`).* 1 conflict at
+1,888 s and still 1 at the cap; the first run without polish had reached
+1 conflict at 1,460 s. Sixty polishes (500,000 GPU iterations on copies of
+the best, then 4 VSS rounds on the CPU), 52 of them from the 1-conflict
+best, removed nothing, at 4% of the run time. The last batch's population
+had a minimum of 4 conflicts and a median of 21: the population is
+diverse, and the 1-conflict solution is not where it lives.
+
+Decisions:
+* DSJC500.5 at 47 is retired. Two runs reach the last conflict in about
+  half an hour and never clear it; 47 is believed optimal, so a tie was
+  the ceiling, and 8 GPU-hours bought the same plateau twice.
+* A1's hypothesis (PartialCol leaves the plateau TabuCol is stuck on) is
+  not supported at this scale: VSS helped from 8 conflicts on the CPU and
+  did nothing from 1 on the GPU. VSS and polish stay available and off;
+  the DESIGN entry says so.
+* The calibration moves to A2: DSJC1000.5 and flat1000_76_0 at k = best
+  known, defaults (no polish, no VSS), `--max-seconds 14400`, one run
+  each, traces on. Verify both k before the run. A tie there is the
+  signal that the population is at HEAD's level; two misses at 1–2
+  conflicts would say the limit is the method (HEAD's tie-breaking,
+  iteration budget per child) and not the hardware, and A4/A5 wait.
 
 ### A4. 16-bit colours
 
