@@ -107,6 +107,15 @@ tai30a reach the optimum with clean recounts. GPU run pending. Review:
    and that stays right. Add one `--cpu` check of 50 resumed batches on
    tai30a with `--trace` to confirm nothing drifts (costs recounted, best
    never worse than the previous batch).
+3. `scripts/q6-grid.sh` runs the spec (3 instances × 3 arms × 5 seeds ×
+   1 h = 45 GPU-hours on one card). Stage it: the aspiration sweep on
+   tai50a first (`SWEEP=1`, 30-minute budget is enough there: the memetic
+   tie took 13 minutes on 4 cores), then tai50a with all three arms at the
+   winning aspiration, then tai60a and tai80a only with the arms that
+   reached tai50a's best known on at least 3 of 5 seeds. An arm that
+   cannot tie tai50a has nothing to say about tai80a. Results under
+   `results/q6/` stay out of git (logs and traces); the summary
+   (`scripts/q6-summary.py`) goes in a report.
 
 ### Q7. tai256c on the GPU
 

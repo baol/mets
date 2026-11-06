@@ -7,3 +7,4 @@ graph-coloring-instances/
 *.sol
 nohup.out
 __pycache__/
+results/
