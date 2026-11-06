@@ -15,7 +15,8 @@
 //!   --seed S         (default 1)
 //!   --threads T      GPU threads per block (default 128)
 //!   --cpu            improve on the CPU threads instead of the GPU
-//! A legal colouring is verified and saved as NAME.K.sol ("vertex colour", 1-based).
+//! A legal colouring is verified and saved as NAME.K.sol ("vertex colour", 1-based),
+//! or the first free NAME.K.2.sol, … if that file exists.
 //!   --polish-every G  every G generations, if the best colouring has 1 or 2
 //!                    conflicts, improve copies of it in one whole batch, each with
 //!                    its own seed, for --polish-iters L·n iterations (default 0: never)
@@ -46,7 +47,7 @@ mod common; // only for its argument parser
 #[path = "common/coloring.rs"]
 mod graph_coloring;
 
-use common::Args;
+use common::{fresh_path, Args};
 use graph_coloring::*;
 use mets::rand::{Rng, SeedableRng};
 use mets::*;
@@ -646,7 +647,7 @@ fn main() {
         let name = std::path::Path::new(file)
             .file_stem()
             .map_or("graph".into(), |s| s.to_string_lossy());
-        let out = format!("{name}.{k}.sol");
+        let out = fresh_path(&format!("{name}.{k}"), "sol"); // never overwrite
         let text: String = best
             .1
             .iter()

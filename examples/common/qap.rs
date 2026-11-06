@@ -489,6 +489,19 @@ pub fn random_start(n: usize, seed: u64) -> Vec<usize> {
     p
 }
 
+/// `STEM.EXT`, or the first free `STEM.2.EXT`, `STEM.3.EXT`, … if it is
+/// taken: a run never overwrites another run's solution file.
+pub fn fresh_path(stem: &str, ext: &str) -> String {
+    let first = format!("{stem}.{ext}");
+    if !Path::new(&first).exists() {
+        return first;
+    }
+    (2..)
+        .map(|i| format!("{stem}.{i}.{ext}"))
+        .find(|p| !Path::new(p).exists())
+        .expect("a free name")
+}
+
 pub fn gap(cost: C, best_known: C) -> f64 {
     (cost - best_known) as f64 * 100.0 / (best_known as f64).abs().max(1.0)
 }

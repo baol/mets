@@ -41,7 +41,10 @@
 //!   --polish-from FILE.best  skip the search: k-opt polish this permutation
 //!                    (default K = 9), save the result as NAME.kopt.best
 //! The best permutation found is saved as NAME.best (cost, then the 1-based
-//! facility of each location), rewritten at every improvement.
+//! facility of each location), rewritten at every improvement. A run never
+//! overwrites another run's file: if NAME.best exists when it starts, it
+//! writes the first free NAME.2.best, NAME.3.best, … (the same for
+//! NAME.kopt.best).
 //!
 //! Build and run as `coloring_gpu` (driver and NVRTC at run time):
 //!   cargo run --release --features gpu --example qap_gpu -- tai100a.dat tai100a.sln --trace qap.trace
@@ -1158,7 +1161,12 @@ fn main() {
             &mut rng,
             &mut trace,
         );
-        save(&format!("{name}.kopt.best"), cost, &p, best_known);
+        save(
+            &fresh_path(&format!("{name}.kopt"), "best"),
+            cost,
+            &p,
+            best_known,
+        );
         return;
     }
     let setup = Instant::now();
@@ -1188,13 +1196,16 @@ fn main() {
         .map(|i| random_start(n, seed.wrapping_mul(1000) + i as u64))
         .collect();
     let mut best = (C::MAX, Vec::new());
+    // this run's own file: never another run's
+    let out_best = fresh_path(&name, "best");
+    println!("{file}: the best is saved as {out_best} at every improvement");
     // record a new best (on disk at once, so an interrupted run keeps it) and
     // report; true when the run should stop
     let progress =
         |generation: u64, best: &mut (C, Vec<usize>), cand: (C, &[usize]), extra: String| {
             if cand.0 < best.0 {
                 *best = (cand.0, cand.1.to_vec());
-                write_perm(&format!("{name}.best"), best.0, &best.1);
+                write_perm(&out_best, best.0, &best.1);
             }
             let secs = t0.elapsed().as_secs_f64();
             let reached = best_known.is_some_and(|b| best.0 <= b);
@@ -1364,7 +1375,7 @@ fn main() {
         "verified"
     );
     print!("{file}: in {:.1} s, ", t0.elapsed().as_secs_f64());
-    save(&format!("{name}.best"), best.0, &best.1, best_known);
+    save(&out_best, best.0, &best.1, best_known);
 }
 
 /// Write a permutation as `cost`, then the 1-based facilities.
