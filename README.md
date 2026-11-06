@@ -73,7 +73,10 @@ for every instance.
 
 [`DESIGN.md`](DESIGN.md) explains the API and the design choices, compares it
 with METSlib, and has benchmarks against the C++ library. `cargo doc --open`
-for the API reference.
+for the API reference. [`PLAN-records.md`](PLAN-records.md) is the
+implementation spec of the record attempts on QAP and graph colouring, and
+[`PLAN-problems.md`](PLAN-problems.md) reviews that round and sets the
+directions for the next one (QAP, colouring, TSP, and other problem classes).
 
 ## License
 
