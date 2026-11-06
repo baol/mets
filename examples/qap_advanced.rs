@@ -12,6 +12,10 @@
 //! * `ma`: Merz & Freisleben's memetic algorithm (1999): population 40,
 //!   uniform crossover, `perm::SwapDescent` (first improvement, don't-look
 //!   bits) on the plain model, renewal after 30 children without insertion.
+//! * `bls`: Benlic & Hao's breakout local search: `perm::SwapDescent` to a
+//!   local optimum, then `perm::directed_perturbation` (the best swap not used
+//!   recently, random swaps as the search keeps returning to the same
+//!   optimum), the perturbed optimum always accepted (`IteratedSearch`).
 //! * `lns`: large neighborhood search with `perm::BestRearrangement`: every
 //!   step moves to the best other arrangement of k random positions (all
 //!   k! − 1 of them are tried), accepted by late acceptance over 10n
@@ -26,7 +30,7 @@
 //!   qap_advanced FILE.dat [FILE.sln] [options]         solve one instance
 //!   qap_advanced --qaplib DATA_DIR SOLN_DIR [options]  solve every instance
 //! options:
-//!   --method M     memetic | restarts | lns | ma (default memetic)
+//!   --method M     memetic | restarts | lns | ma | bls (default memetic)
 //!   --steps N      per run: children / restarts (default 50; ma 100000), or rebuilds for lns (default 1500000)
 //!   --population P memetic / ma: population size (default 10; ma 40)
 //!   --crossover X  memetic / ma: uniform | path (path relinking half-way, DE-style) |
@@ -70,6 +74,9 @@ enum Method {
     Lns,
     /// Merz & Freisleben (1999): population 40, swap descent with don't-look bits.
     Ma,
+    /// Benlic & Hao's breakout local search: swap descent, directed
+    /// perturbation, the perturbed local optimum always accepted.
+    Bls,
 }
 
 struct Settings {
@@ -261,6 +268,21 @@ fn run(inst: &Instance, seed: u64, target: Option<C>, cancel: &Cancel, set: &Set
             .run();
             st.global_best().cost()
         }
+        Method::Bls => {
+            // a descent's many cheap moves: the plain model's O(1) swap fits it
+            let mut st = State::new(QapPlain { inst, p: start }, seed);
+            IteratedSearch::new(
+                perm::SwapDescent::new(),
+                cancel,
+                perm::directed_perturbation::<QapPlain>(n),
+                Always,
+            )
+            .runner(&mut st)
+            .until(steps)
+            .on_global_improvement(|st| stop_at(st.global_best().cost(), target, cancel))
+            .run();
+            st.global_best().cost()
+        }
         Method::Ma => {
             // many cheap moves: the plain model's O(1) swap fits it better
             let mut st = State::new(QapPlain { inst, p: start }, seed);
@@ -398,13 +420,15 @@ fn main() {
         Some("restarts") => Method::Restarts,
         Some("lns") => Method::Lns,
         Some("ma") => Method::Ma,
-        Some(m) => panic!("unknown method {m:?} (memetic, restarts, lns)"),
+        Some("bls") => Method::Bls,
+        Some(m) => panic!("unknown method {m:?} (memetic, restarts, lns, ma, bls)"),
     };
     let set = Settings {
         method,
         steps: args.value("--steps").unwrap_or(match method {
             Method::Lns => 1_500_000,
             Method::Ma => 100_000,
+            Method::Bls => 100_000_000,
             _ => 50,
         }),
         runs: args.value("--runs").unwrap_or(4),
@@ -450,6 +474,7 @@ fn main() {
         }
         Method::Restarts => "random restarts of iterated robust tabu search",
         Method::Ma => "Merz & Freisleben memetic (swap descent with don't-look bits)",
+        Method::Bls => "breakout local search (swap descent, directed perturbation, always accept)",
         Method::Lns => {
             "large neighborhood search (best other arrangement of k random positions, late acceptance)"
         }

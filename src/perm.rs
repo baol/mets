@@ -168,17 +168,22 @@ pub fn adaptive_perturbation<S: Permutation>(n: usize) -> Adaptive<PerturbFn<S>,
 
 /// Number of positions where `a` and `b` differ: a distance for
 /// `Memetic::with_distance`.
-/// Breakout-style directed perturbation (Benlic & Hao's BLS for the QAP):
-/// each of the `strength` swaps is, with a probability that decreases while
-/// the search keeps returning to the same local optimum, the best swap (by
-/// delta) not used in the last `tenure` perturbation swaps, unless it leads
-/// below the best cost seen during this perturbation (aspiration); otherwise
-/// a random swap. The strength adapts as [`adaptive_perturbation`]'s: back
-/// to `min` when the incumbent changed, `+ step` (up to `max`) when not.
+/// Breakout local search's perturbation (Benlic & Hao, BLS for the QAP).
+/// Each of the `strength` swaps is directed with probability
+/// max(exp(−ω/threshold), p_min), where ω counts the perturbations since the
+/// best cost seen last improved, else random. A directed swap is the best
+/// swap (by delta) not used in the last `tenure` perturbation swaps, unless
+/// it leads below the best cost seen during this perturbation (aspiration).
+/// The strength grows by `step` (up to `max`) when the search came back to
+/// the incumbent cost of the previous call, and is back to `min` otherwise.
+/// After `threshold` perturbations without a new best, one strong random
+/// perturbation of `max` swaps, and ω starts again. Parameter values follow
+/// the BLS paper as recalled, not checked against it: T = 2,500, P₀ = 0.75,
+/// L₀ = 0.15n, L_max = n/2.
 ///
-/// A directed swap scans all n(n−1)/2 swap deltas: cheap on a model with
-/// O(1) deltas (Taillard's delta matrix); a model without `swap_delta` gets
-/// random swaps only.
+/// A directed swap scans all n(n−1)/2 swap deltas: cheap with O(1) deltas
+/// (Taillard's delta matrix); a model without `swap_delta` gets random swaps
+/// only.
 #[derive(Clone, Debug)]
 pub struct DirectedPerturbation<C> {
     pub min: usize,
@@ -186,10 +191,16 @@ pub struct DirectedPerturbation<C> {
     pub max: usize,
     /// Perturbation swaps during which a used swap stays forbidden.
     pub tenure: u64,
+    /// T: perturbations without a new best before a strong one; also the
+    /// scale of the decay of the directed probability.
+    pub threshold: u64,
+    /// P₀: the directed probability never goes below it.
+    pub p_min: f64,
     strength: usize,
     last: Option<C>,
-    /// Consecutive perturbations from the same incumbent cost.
-    returns: u32,
+    best: Option<C>,
+    /// ω: perturbations since `best` last improved.
+    since_best: u64,
     last_used: Vec<u64>,
     moves: u64,
 }
@@ -201,9 +212,12 @@ impl<C> DirectedPerturbation<C> {
             step,
             max: max.max(min),
             tenure,
+            threshold: 2500,
+            p_min: 0.75,
             strength: min,
             last: None,
-            returns: 0,
+            best: None,
+            since_best: 0,
             last_used: Vec::new(),
             moves: 0,
         }
@@ -216,33 +230,45 @@ impl<C> DirectedPerturbation<C> {
 
     /// Probability of a directed (rather than random) swap.
     fn p_directed(&self) -> f64 {
-        (-(self.returns as f64) / 3.0).exp().max(0.2)
+        (-(self.since_best as f64) / self.threshold.max(1) as f64)
+            .exp()
+            .max(self.p_min)
     }
 }
 
-/// [`DirectedPerturbation`] with [`adaptive_perturbation`]'s strengths and a
-/// tenure of n/2 swaps.
+/// [`DirectedPerturbation`] with BLS's strengths (from 0.15n, +1 per return
+/// to the same optimum, up to n/2) and a tenure of n perturbation swaps.
 pub fn directed_perturbation<S: Permutation>(n: usize) -> DirectedPerturbation<S::Cost> {
     DirectedPerturbation::new(
-        (n / 10).max(2),
-        (n / 20).max(1),
+        ((0.15 * n as f64) as usize).max(2),
+        1,
         (n / 2).max(3),
-        (n / 2) as u64,
+        n as u64,
     )
 }
 
 impl<S: Permutation> Perturbation<S> for DirectedPerturbation<S::Cost> {
     fn perturb(&mut self, s: &mut Evaluated<S>, rng: &mut dyn RngCore) {
         let cost = s.cost();
-        if self.last == Some(cost) {
-            self.strength = (self.strength + self.step).min(self.max);
-            self.returns += 1;
+        self.strength = if self.last == Some(cost) {
+            (self.strength + self.step).min(self.max)
         } else {
-            (self.strength, self.returns) = (self.min, 0);
-        }
+            self.min
+        };
         self.last = Some(cost);
+        if self.best.is_none_or(|b| cost < b) {
+            (self.best, self.since_best) = (Some(cost), 0);
+        } else {
+            self.since_best += 1;
+        }
         let n = s.size();
         if n < 2 {
+            return;
+        }
+        if self.since_best > self.threshold {
+            // strong perturbation: max random swaps, then ω starts again
+            self.since_best = 0;
+            perturb(s, self.max, rng);
             return;
         }
         if self.last_used.len() != n * n {
