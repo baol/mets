@@ -14,3 +14,4 @@ on the owner's machine (RTX 3060) are recorded here as they were shared.
 | [2026-11-06-q6-q9.md](2026-11-06-q6-q9.md) | Q6 flags for `qap_gpu`; Q9 breakout local search, a cycling bug and its fix, the run |
 | [2026-11-06-gpu-q6-sweep-and-a3.md](2026-11-06-gpu-q6-sweep-and-a3.md) | RTX 3060: Q6 aspiration sweep on tai50a (10n² reaches the best known on 5/5 seeds); DSJC500.5 at 47 with polish and VSS (1 conflict) |
 | [2026-11-06-q6-tai50a-arms.md](2026-11-06-q6-tai50a-arms.md) | Q6 on tai50a: aspiration 20n² (5/5, median 35 s), arms A (4/5) and C (5/5) at 10n² |
+| [2026-11-06-a2-preparation.md](2026-11-06-a2-preparation.md) | A2 preparation: CPU host loop on DSJC1000.5 (k = 82) and flat1000_76_0 (k = 81); the GPU will take the global-memory path |
