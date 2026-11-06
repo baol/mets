@@ -11,6 +11,17 @@
 use mets::*;
 use std::path::Path;
 
+/// Route versions: a fresh number at every change of a route's sequence,
+/// unique across all clones, so a cache keyed by it is never stale.
+static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+fn fresh_version() -> u64 {
+    VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[path = "geni.rs"]
+pub mod geni;
+use geni::Geni;
+
 /// Euclidean distances: rounded to the nearest integer, or real.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Rounding {
@@ -296,6 +307,8 @@ pub struct Routes<'a> {
     pub penalties: Penalties,
     /// (customer, from, to) of the last relocation, for the search's bookkeeping.
     pub last: Option<(usize, usize, usize)>,
+    /// Per route, a number that changes whenever its sequence does.
+    pub version: Vec<u64>,
 }
 
 impl<'a> Routes<'a> {
@@ -331,6 +344,7 @@ impl<'a> Routes<'a> {
             size: vec![0; m],
             penalties,
             last: None,
+            version: (0..m).map(|_| fresh_version()).collect(),
         };
         for k in 0..m {
             s.route[n + k] = k as u32;
@@ -487,6 +501,7 @@ impl<'a> Routes<'a> {
         self.load[k] -= self.inst.demand[c];
         self.service[k] -= self.inst.service[c];
         self.size[k] -= 1;
+        self.version[k] = fresh_version();
         self.unlink(c);
         self.route[c] = u32::MAX;
         self.succ[c] = c as u32;
@@ -501,7 +516,29 @@ impl<'a> Routes<'a> {
         self.load[k] += self.inst.demand[c];
         self.service[k] += self.inst.service[c];
         self.size[k] += 1;
+        self.version[k] = fresh_version();
         self.insert_after(c, a);
+    }
+
+    /// Route k as a GENI tour: its sentinel, then its customers.
+    pub fn tour(&self, k: usize) -> Vec<usize> {
+        let mut t = Vec::with_capacity(self.size[k] as usize + 1);
+        t.push(self.inst.n + k);
+        t.extend(self.customers(k));
+        t
+    }
+
+    /// Put customer c (off every route) into route k by the GENI move g,
+    /// evaluated on `self.tour(k)`; route tables updated.
+    pub fn put_geni(&mut self, c: usize, k: usize, g: &Geni) {
+        let tour = self.tour(k);
+        let cycle = geni::apply(&tour, c, g);
+        debug_assert_eq!(cycle[0], self.inst.n + k);
+        self.load[k] += self.inst.demand[c];
+        self.service[k] += self.inst.service[c];
+        self.size[k] += 1;
+        self.route[c] = k as u32;
+        self.relink(k, &cycle[1..]);
     }
 
     /// Intra-route refinement (the paper's every-200-iterations pass, in the
@@ -596,6 +633,7 @@ impl<'a> Routes<'a> {
 
     /// Replace route k's sequence (same customers, new order).
     fn relink(&mut self, k: usize, seq: &[usize]) {
+        self.version[k] = fresh_version();
         let start = self.inst.n + k;
         let mut prev = start;
         for &c in seq {
@@ -650,11 +688,16 @@ impl Model for Routes<'_> {
 /// Move customer c to route `to`, after node `after` (a customer of `to`, or
 /// its sentinel). The delta is O(1): three arcs and the two routes' load and
 /// duration penalties.
+///
+/// With `geni`, the insertion into `to` is that GENI move instead (`after`
+/// unused), on route `to`'s tour [sentinel, c₁, …] as it is when the move
+/// is evaluated; removal is always by reconnection.
 #[derive(Clone, Copy, Debug)]
 pub struct Relocate {
     pub c: usize,
     pub to: usize,
     pub after: usize,
+    pub geni: Option<Geni>,
 }
 
 impl<'a> Relocate {
@@ -681,8 +724,13 @@ impl<'a> Relocate {
                 * (s.duration_excess(len + removed + added, srv) - s.duration_excess(len, srv));
             return removed + added + pen;
         }
-        let b = s.succ[a] as usize;
-        let added = s.d(a, c) + s.d(c, b) - s.d(a, b);
+        let added = match self.geni {
+            Some(g) => g.added,
+            None => {
+                let b = s.succ[a] as usize;
+                s.d(a, c) + s.d(c, b) - s.d(a, b)
+            }
+        };
         let (dq, ds) = (s.inst.demand[c], s.inst.service[c]);
         let (lf, lt) = (s.load[from], s.load[self.to]);
         let load_pen =
@@ -700,7 +748,10 @@ impl<'a> Move<Routes<'a>> for Relocate {
     fn apply(&self, s: &mut Routes<'a>) {
         let from = s.route[self.c] as usize;
         s.remove(self.c);
-        s.put(self.c, self.after);
+        match self.geni {
+            Some(g) => s.put_geni(self.c, self.to, &g),
+            None => s.put(self.c, self.after),
+        }
         s.last = Some((self.c, from, self.to));
     }
     #[inline]
@@ -730,7 +781,24 @@ impl<'a> DenseAttr<Routes<'a>> for Relocate {
 
 /// Relocate each customer to the best position (by distance) of every other
 /// route; empty routes are all the same, so only the first is tried.
-pub struct InterRoute;
+/// With `geni_p` > 0 the position is the best GENI insertion (types I and
+/// II, p-neighbourhoods of that size, plain insertion included). The best
+/// GENI insertion of c into route k depends only on k's sequence, so it is
+/// cached per (c, k) under the route's version: a move recomputes two
+/// routes' entries, not m.
+pub struct InterRoute {
+    pub geni_p: usize,
+    cache: Vec<(u64, Geni)>,
+}
+
+impl InterRoute {
+    pub fn new(geni_p: usize) -> Self {
+        InterRoute {
+            geni_p,
+            cache: Vec::new(),
+        }
+    }
+}
 
 impl<'a> Neighborhood<Routes<'a>> for InterRoute {
     type Move = Relocate;
@@ -739,15 +807,68 @@ impl<'a> Neighborhood<Routes<'a>> for InterRoute {
         s: &Evaluated<Routes<'a>>,
         vis: &mut V,
     ) -> std::ops::ControlFlow<()> {
-        let first_empty = (0..s.m).find(|&k| s.size[k] == 0);
-        for c in 1..s.inst.n {
+        let (n, m) = (s.inst.n, s.m);
+        let first_empty = (0..m).find(|&k| s.size[k] == 0);
+        let d = |a: usize, b: usize| s.d(a, b);
+        if self.geni_p > 0 {
+            let stale = (0, geni::best(&[0], 0, 0, &d));
+            self.cache.resize(n * m, stale);
+            for k in 0..m {
+                if s.size[k] == 0 && Some(k) != first_empty {
+                    continue;
+                }
+                if (1..n)
+                    .all(|c| s.route[c] as usize == k || self.cache[c * m + k].0 == s.version[k])
+                {
+                    continue;
+                }
+                let tour = s.tour(k);
+                let near = geni::Near::new(&tour, self.geni_p, &d);
+                for c in 1..n {
+                    let e = &mut self.cache[c * m + k];
+                    if s.route[c] as usize != k && e.0 != s.version[k] {
+                        let mut g = geni::best_with(&tour, &near, c, self.geni_p, &d);
+                        if g.kind == 0 {
+                            // plain: keep the node to insert after in `i`
+                            g.i = tour[g.i as usize] as u32;
+                        }
+                        *e = (s.version[k], g);
+                    }
+                }
+            }
+        }
+        for c in 1..n {
             let from = s.route[c] as usize;
-            for k in 0..s.m {
+            for k in 0..m {
                 if k == from || (s.size[k] == 0 && Some(k) != first_empty) {
                     continue;
                 }
-                let (after, _) = s.best_insertion(c, k);
-                let m = Relocate { c, to: k, after };
+                let m = if self.geni_p > 0 {
+                    let g = self.cache[c * s.m + k].1;
+                    if g.kind == 0 {
+                        Relocate {
+                            c,
+                            to: k,
+                            after: g.i as usize,
+                            geni: None,
+                        }
+                    } else {
+                        Relocate {
+                            c,
+                            to: k,
+                            after: c,
+                            geni: Some(g),
+                        }
+                    }
+                } else {
+                    let (after, _) = s.best_insertion(c, k);
+                    Relocate {
+                        c,
+                        to: k,
+                        after,
+                        geni: None,
+                    }
+                };
                 vis.visit(m, m.delta_of(s))?;
             }
         }
