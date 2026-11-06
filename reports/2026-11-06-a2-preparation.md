@@ -28,6 +28,9 @@ What the GPU path will do on these graphs, from `coloring_gpu`'s formulas
   new key layout is in use, though these sizes would also have fit the old
   20-bit one.
 
-Not done, by the plan's rule: the k values. 82 and 81 are the plan's
-working values; they need confirming from a source the owner provides
-before any GPU run (the sandbox cannot reach the literature).
+**k values, confirmed by the owner (2026-11-06):** DSJC1000.5 k = 82 and
+flat1000_76_0 k = 81, the best-known upper bounds as listed in Moalic &
+Gondran, "Variations on Memetic Algorithms for Graph Coloring Problems"
+(the HEAD paper, arXiv:1401.2184, <https://arxiv.org/abs/1401.2184>), for
+the DIMACS graphs of <https://mat.tepper.cmu.edu/COLOR/instances.html>. The
+plan's working values were right; the A2 runs use them.
