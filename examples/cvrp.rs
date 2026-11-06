@@ -16,7 +16,7 @@
 //! and reinserted. The run stops after η tabu iterations in total.
 //!
 //! usage:
-//!   cvrp FILE.vrp [FILE.sol] [--eta N] [--seed S] [--vehicles M] [--max-seconds T]
+//!   cvrp FILE.vrp [FILE.sol] [--eta N] [--seed S] [--vehicles M | --no-spare] [--max-seconds T]
 //!       solve; the best feasible solution is saved as NAME.sol (CVRPLIB format,
 //!       or the first free NAME.2.sol, …); a .sol gives the gap to its cost and,
 //!       by default, the fleet size (its routes, plus one spare vehicle)
@@ -219,6 +219,8 @@ fn main() {
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(f64::INFINITY);
     let vehicles: Option<usize> = args.value("--vehicles");
+    // default fleet: the reference routes (or the load bound) plus one spare
+    let spare = if args.flag("--no-spare") { 0 } else { 1 };
     let file = args
         .0
         .first()
@@ -232,7 +234,7 @@ fn main() {
     let total: f64 = inst.demand.iter().sum();
     let m = vehicles.unwrap_or_else(|| {
         let lower = (total / inst.capacity).ceil() as usize;
-        reference.as_ref().map_or(lower, |r| r.0.len()).max(lower) + 1
+        reference.as_ref().map_or(lower, |r| r.0.len()).max(lower) + spare
     });
     let ref_cost = reference.as_ref().and_then(|r| r.1);
     println!(
