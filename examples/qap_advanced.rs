@@ -353,10 +353,13 @@ fn ma_islands(inst: &Instance, target: Option<C>, set: &Settings) -> Vec<C> {
 
 fn solve(inst: &Instance, best_known: Option<C>, set: &Settings) -> Solved {
     let target = best_known.filter(|_| set.stop_at_best);
-    if set.crossover == Recombine::Cohesive && inst.distance().is_none() {
-        eprintln!(
-            "note: no distance matrix in this instance; cohesive crossover falls back to uniform"
-        );
+    if set.crossover == Recombine::Cohesive {
+        match inst.proximity() {
+            Some(px) => eprintln!("cohesive crossover on the {}", px.describe()),
+            None => eprintln!(
+                "note: no distance or similarity matrix in this instance; cohesive crossover falls back to uniform"
+            ),
+        }
     }
     let t0 = Instant::now();
     if set.method == Method::Ma && set.migrate_every > 0 {
@@ -523,7 +526,6 @@ mod tests {
                 population: 4,
                 crossover: Recombine::Uniform,
                 replace_parent: false,
-                perturbation: Perturb::Random,
                 perturbation: Perturb::Random,
                 stop_at_best: false,
             };
