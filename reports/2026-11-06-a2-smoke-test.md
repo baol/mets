@@ -51,3 +51,26 @@ A2.6 is closed; if it is not faster than 1.2 M it/s, the 4-hour runs go
 ahead on global 16-bit tables (`--table 16`), and `--table auto`, which
 today prefers the 8-bit shared table whenever the 16-bit one does not
 fit, is changed to prefer global 16-bit.
+
+## Block width: `--table 8 --threads 512` (owner, build `ad135ed`)
+
+Same command, 512 threads per block, still 1 block per SM × 28. 68
+batches in 606 s, every one `mismatches=0 bad_colourings=0`, no
+saturation. Best 57 conflicts (global tables: 61; 8-bit at 128 threads:
+72).
+
+| table, threads per block | blocks resident | batch (s) | TabuCol it/s (log's bound) | best at 600 s |
+|---|---|---|---|---|
+| 16-bit global, 128 | 252 | ~11.3 | ~1.2 M | 61 |
+| 8-bit shared, 128 | 28 | ~47 | 0.27 M | 72 |
+| **8-bit shared, 512** | 28 | **8.1–9.6 (8.7 median)** | **1.27 → 1.50 M** | **57** |
+
+At 512 threads the shared 8-bit table passes the global tables: 1.3×
+faster per batch, 4 fewer conflicts at equal time (one seed). The batch
+time falls during the run (10.6 → 8.1 s) as the conflict lists shrink,
+as on the global run. So the block width was the missing variable: one
+block per SM needs 16 warps to keep the SM busy. Still to run: `--threads
+1024` (the plan's second run), then the choice between 512 and 1024 for
+the 4-hour runs. `--table auto` is already right for this graph (the
+16-bit table does not fit, so it picks 8-bit), but the default 128
+threads is not: the 4-hour runs must pass `--threads` explicitly.
