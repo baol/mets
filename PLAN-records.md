@@ -12,7 +12,9 @@ A1, Q1, Q3, Q2, A2, Q4.
   only (`GIT_COMMITTER_NAME=Claude GIT_COMMITTER_EMAIL=noreply@anthropic.com`).
   No `Co-Authored-By` lines.
 * Before every push: `cargo fmt`, `cargo clippy --all-targets`,
-  `cargo clippy --all-targets --features gpu`, `cargo test`. The GPU kernels
+  `cargo clippy --all-targets --features gpu`, `cargo test`, and
+  `cargo test --examples` (plain `cargo test` builds the examples but does
+  not run their test modules). The GPU kernels
   cannot run in the sandbox (no GPU): compile them with `--features gpu`,
   test the host loops with `--cpu`, and keep the `--trace` recounts, which are
   how kernel bugs show up on the user's machine (`mismatches` must stay 0).
