@@ -74,3 +74,22 @@ block per SM needs 16 warps to keep the SM busy. Still to run: `--threads
 the 4-hour runs. `--table auto` is already right for this graph (the
 16-bit table does not fit, so it picks 8-bit), but the default 128
 threads is not: the 4-hour runs must pass `--threads` explicitly.
+
+## Block width: `--threads 1024` (owner, build `ad135ed`)
+
+99 batches in 604 s, all clean, best **55** conflicts.
+
+| table, threads per block | batch (s), start → end | TabuCol it/s (log's bound) | batches in 600 s | best |
+|---|---|---|---|---|
+| 16-bit global, 128 | ~11.3 | ~1.2 M | 53 | 61 |
+| 8-bit shared, 512 | 10.6 → 8.1 | 1.27 → 1.50 M | 68 | 57 |
+| **8-bit shared, 1024** | **7.8 → 5.6** | **1.73 → 2.19 M** | **99** | **55** |
+
+1024 threads, the hardware maximum, is the fastest: 1.8× the global
+tables and 1.35× the 512 run. **A2.6 is settled: 8-bit shared table, 1024
+threads per block.** The rate is still under the plan's 3 M, but A2.6 was
+the planned remedy and it is spent, so the two 4-hour calibration runs
+go ahead at this setting (`--table 8 --threads 1024`, defaults
+otherwise). The DESIGN lesson: with one block per SM, the block has to be
+as wide as the SM can hold. The shared table pays only with enough warps
+behind it, not only "while it leaves 2 blocks per SM".
