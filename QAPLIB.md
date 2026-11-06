@@ -198,3 +198,33 @@ cargo run --release --example qap -- --qaplib path/to/qapdata path/to/qapsoln --
 | tai | 26 | 17 | 0.13% | 0.90% |
 | tho | 3 | 2 | 0.03% | 0.10% |
 | wil | 2 | 0 | 0.05% | 0.08% |
+
+## Best-known values reached by longer runs
+
+The table above is the 200-restart baseline. Longer runs of the stronger
+solvers reach the best-known value exactly on these open instances (ties,
+not records; no value below a best known has been found):
+
+| instance | best known | solver, hardware, time |
+|---|---|---|
+| tai80b | 818,415,043 | `qap_advanced --method memetic`, 4 cores, 24 min |
+| sko81 | 90,998 | memetic, 4 cores, 16 min |
+| sko90 | 115,534 | memetic, 4 cores, 18 min |
+| wil50 | 48,816 | memetic, 4 cores, 5 min |
+| sko100a | 152,002 | memetic, 4 cores, 25 min; `qap_gpu`, RTX 3060, 21.6 s |
+| sko100b | 153,890 | memetic, 4 cores, 25 min |
+| sko100c | 147,862 | memetic, 4 cores, 25 min |
+| sko100d | 149,576 | memetic, 4 cores, 23 min |
+| sko100e | 149,150 | memetic, 4 cores, 25 min |
+| sko100f | 149,036 | `qap_advanced --method ma`, 4 cores, 28 min |
+| wil100 | 273,038 | ma, 4 cores, 27 min |
+| tai150b | 498,896,643 | ma, 2 cores' share of 4, ≤ 55 min |
+| tai50a | 4,938,796 | memetic, 4 cores, 756 s |
+| tho150 | 8,133,398 | `qap_gpu --crossover cohesive`, RTX 3060, 49 min (build 70d0fcf) |
+
+The tho150 permutation was checked independently: recomputing the cost from
+`tho150.dat` gives 8,133,398, and the permutation is exactly the inverse of
+the one in `tho150.sln` (QAPLIB lists facility → location): the GPU found
+the published assignment itself. A 4-hour run did not go below it, and an
+exhaustive 9-opt polish (1,024 groups of 9 close positions per round) found
+no improving rearrangement.
