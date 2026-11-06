@@ -19,6 +19,13 @@
 //!   --run-to-end     do not stop at the best-known value
 //!   --crossover X    uniform | cohesive (Drezner: one parent's elements on a ball of
 //!                    close positions; uniform without a distance matrix) (default uniform)
+//!   --independent    Q6 arm B: no crossover; every member is an independent robust tabu
+//!                    trajectory, each batch continuing where the last stopped (the GPU
+//!                    keeps each member's tabu memory; the CPU path starts a fresh one)
+//!   --perturb-stalled  Q6 arm C (implies --independent): after a batch that did not
+//!                    improve a member's best, k random swaps on it, k uniform in [n/10, n/4]
+//!   --tenure LO,HI   tabu tenure drawn in [LO·n, HI·n] (default 0.9,1.1)
+//!   --aspiration X   long-term aspiration after X·n² iterations (default 5)
 //!   --stagnation G   a member whose children have not beaten it for G generations
 //!                    restarts from a random permutation (default 0: never)
 //!   --seed S         (default 1)
@@ -52,8 +59,52 @@ use std::time::Instant;
 
 /// Improves a batch of permutations in place: each becomes the best one its
 /// tabu run found. Returns their costs.
+/// Robust tabu search parameters (Taillard): the tenure is drawn in
+/// [tenure.0·n, tenure.1·n] every 2·tenure.1·n iterations; a swap that puts
+/// back an assignment unseen for aspiration·n² iterations is aspired.
+#[derive(Clone, Copy, Debug)]
+pub struct RotsParams {
+    pub tenure: (f64, f64),
+    pub aspiration: f64,
+}
+
+impl Default for RotsParams {
+    fn default() -> Self {
+        RotsParams {
+            tenure: (0.9, 1.1),
+            aspiration: 5.0,
+        }
+    }
+}
+
+/// Runs robust tabu search on a batch of permutations.
 trait Improver {
-    fn improve(&mut self, batch: &mut [Vec<usize>], iters: u64, seed: u64) -> Vec<C>;
+    /// Continue each member: `iters` iterations from `cur[i]`, after which
+    /// `cur[i]` is the final position; `best[i]` and `best_cost[i]` are
+    /// replaced when the run beats `best_cost[i]`. With `resume`, a member
+    /// keeps its tabu memory from the previous call, whose iterations ended
+    /// at `it0` (the GPU does; the CPU path starts a fresh memory).
+    #[allow(clippy::too_many_arguments)]
+    fn advance(
+        &mut self,
+        cur: &mut [Vec<usize>],
+        best: &mut [Vec<usize>],
+        best_cost: &mut [C],
+        iters: u64,
+        it0: u64,
+        resume: bool,
+        seed: u64,
+    );
+
+    /// Improve each start in place: it becomes the best its run found.
+    /// Returns the costs.
+    fn improve(&mut self, batch: &mut [Vec<usize>], iters: u64, seed: u64) -> Vec<C> {
+        let mut cur = batch.to_vec();
+        let mut cost = vec![C::MAX; batch.len()];
+        self.advance(&mut cur, batch, &mut cost, iters, 0, false, seed);
+        cost
+    }
+
     fn name(&self) -> String;
 }
 
@@ -61,34 +112,45 @@ trait Improver {
 struct CpuRots<'a> {
     inst: &'a Instance,
     jobs: usize,
+    params: RotsParams,
 }
 
 impl Improver for CpuRots<'_> {
-    fn improve(&mut self, batch: &mut [Vec<usize>], iters: u64, seed: u64) -> Vec<C> {
-        let mut costs = vec![0; batch.len()];
-        let chunk = batch.len().div_ceil(self.jobs.max(1)).max(1);
+    fn advance(
+        &mut self,
+        cur: &mut [Vec<usize>],
+        best: &mut [Vec<usize>],
+        best_cost: &mut [C],
+        iters: u64,
+        _it0: u64,
+        _resume: bool,
+        seed: u64,
+    ) {
+        let chunk = cur.len().div_ceil(self.jobs.max(1)).max(1);
+        let (inst, params) = (self.inst, self.params);
         std::thread::scope(|scope| {
-            for (c, (perms, out)) in batch
+            for (c, ((cs, bs), costs)) in cur
                 .chunks_mut(chunk)
-                .zip(costs.chunks_mut(chunk))
+                .zip(best.chunks_mut(chunk))
+                .zip(best_cost.chunks_mut(chunk))
                 .enumerate()
             {
-                let inst = self.inst;
                 scope.spawn(move || {
-                    for (i, (p, cost)) in perms.iter_mut().zip(out).enumerate() {
+                    for (i, ((p, b), cost)) in cs.iter_mut().zip(bs).zip(costs).enumerate() {
                         let run_seed = seed.wrapping_mul(1 << 20) + (c * chunk + i) as u64;
                         let mut st = State::new(QapTaillard::new(inst, p.clone()), run_seed);
-                        perm::RobustTabuSearch::new()
-                            .runner(&mut st)
-                            .until(MaxIterations::new(iters))
-                            .run();
-                        p.clone_from(&st.global_best().p);
-                        *cost = st.global_best().cost();
+                        let mut rots = perm::RobustTabuSearch::new();
+                        (rots.tenure, rots.aspiration) = (params.tenure, params.aspiration);
+                        rots.runner(&mut st).until(MaxIterations::new(iters)).run();
+                        p.clone_from(&st.current().p);
+                        if st.global_best().cost() < *cost {
+                            *cost = st.global_best().cost();
+                            b.clone_from(&st.global_best().p);
+                        }
                     }
                 });
             }
         });
-        costs
     }
     fn name(&self) -> String {
         format!("CPU, {} threads", self.jobs)
@@ -97,7 +159,7 @@ impl Improver for CpuRots<'_> {
 
 #[cfg(feature = "gpu")]
 mod gpu {
-    use super::{unrank, Improver, Instance, KOpt, C};
+    use super::{unrank, Improver, Instance, KOpt, RotsParams, C};
     use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
     use std::sync::Arc;
 
@@ -149,8 +211,9 @@ __device__ ll warp_delta(const ll* __restrict__ a, const ll* __restrict__ b,
 extern "C" __global__ void rots(
     const ll* __restrict__ a, const ll* __restrict__ b,
     const ll* __restrict__ at, const ll* __restrict__ bt, int n,
-    int* best_perm, ll* delta_all, int* tabu_all, ll* out_cost,
-    long long iters, unsigned int seed, int use_shared, int symmetric)
+    int* best_perm, int* cur_perm, const ll* best_in, ll* delta_all, int* tabu_all,
+    ll* out_cost, long long iters, long long it0, int resume, double tenure_lo,
+    double tenure_hi, double aspiration, unsigned int seed, int use_shared, int symmetric)
 {
     const int blk = blockIdx.x, t = threadIdx.x, T = blockDim.x;
     const int lane = t & 31, warp = t >> 5, warps = T >> 5;
@@ -173,11 +236,14 @@ extern "C" __global__ void rots(
     unsigned int rng = seed ^ (0x9E3779B9u * (unsigned)(blk + 1));
     if (rng == 0) rng = 1;
     for (int i = 0; i < 4; i++) xs(rng);
-    const int lo = max(1, (int)(0.9 * n)), hi = max(lo, (int)(1.1 * n));
-    const ll asp = 5LL * nn;  // long-term aspiration age
+    const int lo = max(1, (int)(tenure_lo * n)), hi = max(lo, (int)(tenure_hi * n));
+    const ll asp = (ll)(aspiration * nn);  // long-term aspiration age
+    int* curp = cur_perm + (size_t)blk * n;
 
-    for (int v = t; v < n; v += T) p[v] = best[v];
-    for (int q = t; q < nn; q += T) tb[q] = -q;  // staggered "never"
+    // start from the member's current position; keep its tabu memory with resume
+    for (int v = t; v < n; v += T) p[v] = curp[v];
+    if (!resume)
+        for (int q = t; q < nn; q += T) tb[q] = -q;  // staggered "never"
     if (t == 0) cur = 0;
     __syncthreads();
     {
@@ -196,10 +262,17 @@ extern "C" __global__ void rots(
         }
     }
     __syncthreads();
-    if (t == 0) { bestc = cur; tenure = lo + (int)(xs(rng) % (unsigned)(hi - lo + 1)); }
+    // the member's best so far, or the start if it is better
+    const bool start_best = cur < best_in[blk];
+    if (start_best)
+        for (int w = t; w < n; w += T) best[w] = p[w];
+    if (t == 0) {
+        bestc = start_best ? cur : best_in[blk];
+        tenure = lo + (int)(xs(rng) % (unsigned)(hi - lo + 1));
+    }
     __syncthreads();
 
-    for (ll it = 1; it <= iters; it++) {
+    for (ll it = it0 + 1; it <= it0 + iters; it++) {
         if (t == 0) {
             sel = ~0ull;
             if (it % (2 * hi) == 0) tenure = lo + (int)(xs(rng) % (unsigned)(hi - lo + 1));
@@ -276,6 +349,7 @@ extern "C" __global__ void rots(
         }
         __syncthreads();
     }
+    for (int v = t; v < n; v += T) curp[v] = p[v];
     if (t == 0) out_cost[blk] = bestc;
 #undef TRI
 }
@@ -463,6 +537,8 @@ extern "C" __global__ void kopt(
         at: CudaSlice<i64>,
         bt: CudaSlice<i64>,
         best: CudaSlice<i32>,
+        cur: CudaSlice<i32>,
+        best_in: CudaSlice<i64>,
         delta: CudaSlice<i64>,
         tabu: CudaSlice<i32>,
         cost: CudaSlice<i64>,
@@ -474,6 +550,7 @@ extern "C" __global__ void kopt(
         /// Symmetric matrices with zero diagonal: half the delta arithmetic.
         symmetric: bool,
         resident: String,
+        params: RotsParams,
         host: Vec<i32>,
         device: String,
     }
@@ -482,7 +559,12 @@ extern "C" __global__ void kopt(
 
     impl GpuRots {
         /// Buffers for a batch of `p` permutations of `inst` on GPU 0.
-        pub fn new(inst: &Instance, p: usize, threads: u32) -> Result<Self, Error> {
+        pub fn new(
+            inst: &Instance,
+            p: usize,
+            threads: u32,
+            params: RotsParams,
+        ) -> Result<Self, Error> {
             let n = inst.n;
             assert!(n * n < 1 << 23, "swap index must fit 23 bits");
             assert!(threads.is_multiple_of(32), "whole warps");
@@ -519,6 +601,8 @@ extern "C" __global__ void kopt(
                 at: stream.clone_htod(&inst.at)?,
                 bt: stream.clone_htod(&inst.bt)?,
                 best: stream.alloc_zeros(p * n)?,
+                cur: stream.alloc_zeros(p * n)?,
+                best_in: stream.alloc_zeros(p)?,
                 delta: stream.alloc_zeros(if use_shared { 1 } else { p * tri })?,
                 tabu: stream.alloc_zeros(p * n * n)?,
                 cost: stream.alloc_zeros(p)?,
@@ -536,26 +620,59 @@ extern "C" __global__ void kopt(
                     shared_bytes.div_ceil(1024),
                     if inst.symmetric { "symmetric" } else { "general" }
                 ),
+                params,
                 host: vec![0; p * n],
                 device,
             })
         }
 
-        fn run(
-            &mut self,
-            batch: &mut [Vec<usize>],
-            iters: u64,
-            seed: u64,
-        ) -> Result<Vec<C>, Error> {
-            assert_eq!(batch.len(), self.p);
+        fn upload(&mut self, perms: &[Vec<usize>], to_cur: bool) -> Result<(), Error> {
             let n = self.n;
-            for (i, perm) in batch.iter().enumerate() {
+            for (i, perm) in perms.iter().enumerate() {
                 for (h, &x) in self.host[i * n..][..n].iter_mut().zip(perm) {
                     *h = x as i32;
                 }
             }
-            self.stream.memcpy_htod(&self.host, &mut self.best)?;
-            let (n32, iters, seed) = (n as i32, iters as i64, seed as u32);
+            let dst = if to_cur {
+                &mut self.cur
+            } else {
+                &mut self.best
+            };
+            self.stream.memcpy_htod(&self.host, dst)?;
+            Ok(())
+        }
+
+        fn download(&mut self, perms: &mut [Vec<usize>], from_cur: bool) -> Result<(), Error> {
+            let n = self.n;
+            let src = if from_cur { &self.cur } else { &self.best };
+            self.stream.memcpy_dtoh(src, &mut self.host)?;
+            for (i, perm) in perms.iter_mut().enumerate() {
+                for (x, &h) in perm.iter_mut().zip(&self.host[i * n..][..n]) {
+                    *x = h as usize;
+                }
+            }
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn run_advance(
+            &mut self,
+            cur: &mut [Vec<usize>],
+            best: &mut [Vec<usize>],
+            best_cost: &mut [C],
+            iters: u64,
+            it0: u64,
+            resume: bool,
+            seed: u64,
+        ) -> Result<(), Error> {
+            assert_eq!(cur.len(), self.p);
+            self.upload(cur, true)?;
+            self.upload(best, false)?;
+            self.stream.memcpy_htod(&*best_cost, &mut self.best_in)?;
+            let (n32, iters, it0, seed) = (self.n as i32, iters as i64, it0 as i64, seed as u32);
+            let resume = resume as i32;
+            let (tlo, thi) = (self.params.tenure.0, self.params.tenure.1);
+            let aspiration = self.params.aspiration;
             let use_shared = self.use_shared as i32;
             let symmetric = self.symmetric as i32;
             let mut launch = self.stream.launch_builder(&self.f);
@@ -566,10 +683,17 @@ extern "C" __global__ void kopt(
                 .arg(&self.bt)
                 .arg(&n32)
                 .arg(&mut self.best)
+                .arg(&mut self.cur)
+                .arg(&self.best_in)
                 .arg(&mut self.delta)
                 .arg(&mut self.tabu)
                 .arg(&mut self.cost)
                 .arg(&iters)
+                .arg(&it0)
+                .arg(&resume)
+                .arg(&tlo)
+                .arg(&thi)
+                .arg(&aspiration)
                 .arg(&seed)
                 .arg(&use_shared)
                 .arg(&symmetric);
@@ -579,20 +703,25 @@ extern "C" __global__ void kopt(
                 shared_mem_bytes: self.shared_bytes,
             };
             unsafe { launch.launch(cfg) }?;
-            self.stream.memcpy_dtoh(&self.best, &mut self.host)?;
-            let costs = self.stream.clone_dtoh(&self.cost)?;
-            for (i, perm) in batch.iter_mut().enumerate() {
-                for (x, &h) in perm.iter_mut().zip(&self.host[i * n..][..n]) {
-                    *x = h as usize;
-                }
-            }
-            Ok(costs)
+            self.download(cur, true)?;
+            self.download(best, false)?;
+            self.stream.memcpy_dtoh(&self.cost, best_cost)?;
+            Ok(())
         }
     }
 
     impl Improver for GpuRots {
-        fn improve(&mut self, batch: &mut [Vec<usize>], iters: u64, seed: u64) -> Vec<C> {
-            self.run(batch, iters, seed)
+        fn advance(
+            &mut self,
+            cur: &mut [Vec<usize>],
+            best: &mut [Vec<usize>],
+            best_cost: &mut [C],
+            iters: u64,
+            it0: u64,
+            resume: bool,
+            seed: u64,
+        ) {
+            self.run_advance(cur, best, best_cost, iters, it0, resume, seed)
                 .expect("GPU robust tabu search")
         }
         fn name(&self) -> String {
@@ -911,6 +1040,23 @@ fn main() {
         .value("--kopt-groups")
         .unwrap_or(if cpu { 64 } else { 1024 });
     let kopt_rounds: usize = args.value("--kopt-rounds").unwrap_or(20);
+    let perturb_stalled = args.flag("--perturb-stalled");
+    let independent = args.flag("--independent") || perturb_stalled;
+    let mut params = RotsParams::default();
+    if let Some(t) = args.value::<String>("--tenure") {
+        let v: Vec<f64> = t
+            .split(',')
+            .map(|x| x.parse().expect("--tenure LO,HI"))
+            .collect();
+        assert!(
+            v.len() == 2 && 0.0 < v[0] && v[0] <= v[1],
+            "--tenure LO,HI with 0 < LO <= HI"
+        );
+        params.tenure = (v[0], v[1]);
+    }
+    if let Some(a) = args.value::<f64>("--aspiration") {
+        params.aspiration = a;
+    }
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(3600.0);
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let threads: u32 = args.value("--threads").unwrap_or(256);
@@ -977,13 +1123,20 @@ fn main() {
     }
     let setup = Instant::now();
     let mut improver: Box<dyn Improver> = if cpu {
-        Box::new(CpuRots { inst: &inst, jobs })
+        Box::new(CpuRots {
+            inst: &inst,
+            jobs,
+            params,
+        })
     } else {
-        gpu_improver(&inst, population, threads)
+        gpu_improver(&inst, population, threads, params)
     };
     trace.line(format_args!(
-        "start build={} file={file} n={n} population={population} iters={iters} threads={threads} seed={seed} best_known={best_known:?} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
+        "start build={} file={file} n={n} population={population} iters={iters} threads={threads} seed={seed} best_known={best_known:?} mode={} tenure={:?} aspiration={} improver=\"{}\" setup_s={:.3} (includes NVRTC compile)",
         env!("METS_GIT_HASH"),
+        if perturb_stalled { "independent+perturb" } else if independent { "independent" } else { "memetic" },
+        params.tenure,
+        params.aspiration,
         improver.name(),
         setup.elapsed().as_secs_f64(),
     ));
@@ -998,95 +1151,152 @@ fn main() {
     let mut pop: Vec<Vec<usize>> = (0..population)
         .map(|i| random_start(n, seed.wrapping_mul(1000) + i as u64))
         .collect();
-    let t = Instant::now();
-    let mut costs = improver.improve(&mut pop, iters, rng.random());
-    trace.batch(0, &inst, &pop, &costs, t.elapsed().as_secs_f64());
     let mut best = (C::MAX, Vec::new());
-    let mut children = pop.clone();
-    let mut cross: Box<dyn Crossover<QapPlain>> = match crossover.as_str() {
-        "uniform" => Box::new(UniformCrossover),
-        "cohesive" => match (inst.proximity(), inst.cohesive_crossover()) {
-            (Some(px), Some(x)) => {
-                eprintln!("cohesive crossover on the {}", px.describe());
-                Box::new(x)
-            }
-            _ => {
-                eprintln!(
-                    "note: no distance or similarity matrix in this instance; using uniform crossover"
-                );
-                Box::new(UniformCrossover)
-            }
-        },
-        x => panic!("unknown crossover {x:?} (uniform, cohesive)"),
-    };
-    let mut since = vec![0u64; population]; // generations since member i improved
-    let mut restarts = 0u64;
-    for generation in 1.. {
-        if let Some(i) = (0..population).min_by_key(|&i| costs[i]) {
-            if costs[i] < best.0 {
-                best = (costs[i], pop[i].clone());
-                // on disk at once, so an interrupted run keeps its best
+    // record a new best (on disk at once, so an interrupted run keeps it) and
+    // report; true when the run should stop
+    let progress =
+        |generation: u64, best: &mut (C, Vec<usize>), cand: (C, &[usize]), extra: String| {
+            if cand.0 < best.0 {
+                *best = (cand.0, cand.1.to_vec());
                 write_perm(&format!("{name}.best"), best.0, &best.1);
             }
-        }
-        let secs = t0.elapsed().as_secs_f64();
-        let reached = best_known.is_some_and(|b| best.0 <= b);
-        if generation % 10 == 1 || reached {
-            let g = best_known.map_or(String::new(), |b| format!(" (gap {:.3}%)", gap(best.0, b)));
-            println!(
-                "  generation {generation:5}: best {}{g}, {secs:7.1} s, {restarts} restarts",
-                best.0
+            let secs = t0.elapsed().as_secs_f64();
+            let reached = best_known.is_some_and(|b| best.0 <= b);
+            if generation % 10 == 1 || reached {
+                let g =
+                    best_known.map_or(String::new(), |b| format!(" (gap {:.3}%)", gap(best.0, b)));
+                println!(
+                    "  generation {generation:5}: best {}{g}, {secs:7.1} s{extra}",
+                    best.0
+                );
+            }
+            (reached && !run_to_end) || secs > max_seconds
+        };
+    if independent {
+        // Q6 arms B and C: independent robust tabu trajectories, each batch
+        // continuing every member from where it stopped, with its tabu memory
+        let mut cur = pop.clone();
+        let mut bests = pop.clone();
+        let mut costs = vec![C::MAX; population];
+        let mut perturbations = 0u64;
+        for generation in 1u64.. {
+            let before = costs.clone();
+            let t = Instant::now();
+            let it0 = (generation - 1) * iters;
+            improver.advance(
+                &mut cur,
+                &mut bests,
+                &mut costs,
+                iters,
+                it0,
+                generation > 1,
+                rng.random(),
             );
-        }
-        if (reached && !run_to_end) || secs > max_seconds {
-            break;
-        }
-        // each member's child with a random other member
-        for i in 0..population {
-            if stagnation > 0 && since[i] >= stagnation {
-                // stagnant: this member's next child is a fresh random start
-                children[i] = random_start(n, rng.random());
-                (costs[i], since[i]) = (C::MAX, 0);
-                restarts += 1;
-                continue;
+            trace.batch(generation, &inst, &bests, &costs, t.elapsed().as_secs_f64());
+            let i = (0..population)
+                .min_by_key(|&i| costs[i])
+                .expect("population");
+            let extra = format!(", {perturbations} perturbations");
+            if progress(generation, &mut best, (costs[i], &bests[i]), extra) {
+                break;
             }
-            let mut j = rng.random_range(0..population - 1);
-            if j >= i {
-                j += 1;
+            if perturb_stalled {
+                // arm C: a member whose best did not improve in this batch gets
+                // k random swaps, k uniform in [n/10, n/4]
+                let (lo, hi) = ((n / 10).max(1), (n / 4).max(1));
+                for i in 0..population {
+                    if costs[i] >= before[i] {
+                        for _ in 0..rng.random_range(lo..=hi.max(lo)) {
+                            let (x, y) = (rng.random_range(0..n), rng.random_range(0..n));
+                            cur[i].swap(x, y);
+                        }
+                        perturbations += 1;
+                    }
+                }
             }
-            let (a, b) = (
-                QapPlain {
+        }
+    } else {
+        let t = Instant::now();
+        let mut costs = improver.improve(&mut pop, iters, rng.random());
+        trace.batch(0, &inst, &pop, &costs, t.elapsed().as_secs_f64());
+        let mut children = pop.clone();
+        let mut cross: Box<dyn Crossover<QapPlain>> = match crossover.as_str() {
+            "uniform" => Box::new(UniformCrossover),
+            "cohesive" => match (inst.proximity(), inst.cohesive_crossover()) {
+                (Some(px), Some(x)) => {
+                    eprintln!("cohesive crossover on the {}", px.describe());
+                    Box::new(x)
+                }
+                _ => {
+                    eprintln!(
+                        "note: no distance or similarity matrix in this instance; using uniform crossover"
+                    );
+                    Box::new(UniformCrossover)
+                }
+            },
+            x => panic!("unknown crossover {x:?} (uniform, cohesive)"),
+        };
+        let mut since = vec![0u64; population]; // generations since member i improved
+        let mut restarts = 0u64;
+        for generation in 1u64.. {
+            let i = (0..population)
+                .min_by_key(|&i| costs[i])
+                .expect("population");
+            if progress(
+                generation,
+                &mut best,
+                (costs[i], &pop[i]),
+                format!(", {restarts} restarts"),
+            ) {
+                break;
+            }
+            // each member's child with a random other member
+            for i in 0..population {
+                if stagnation > 0 && since[i] >= stagnation {
+                    // stagnant: this member's next child is a fresh random start
+                    children[i] = random_start(n, rng.random());
+                    (costs[i], since[i]) = (C::MAX, 0);
+                    restarts += 1;
+                    continue;
+                }
+                let mut j = rng.random_range(0..population - 1);
+                if j >= i {
+                    j += 1;
+                }
+                let (a, b) = (
+                    QapPlain {
+                        inst: &inst,
+                        p: pop[i].clone(),
+                    },
+                    QapPlain {
+                        inst: &inst,
+                        p: pop[j].clone(),
+                    },
+                );
+                let mut child = QapPlain {
                     inst: &inst,
                     p: pop[i].clone(),
-                },
-                QapPlain {
-                    inst: &inst,
-                    p: pop[j].clone(),
-                },
+                };
+                cross.cross(&a, &b, &mut child, &mut rng);
+                children[i] = child.p;
+            }
+            let t = Instant::now();
+            let child_costs = improver.improve(&mut children, iters, rng.random());
+            trace.batch(
+                generation,
+                &inst,
+                &children,
+                &child_costs,
+                t.elapsed().as_secs_f64(),
             );
-            let mut child = QapPlain {
-                inst: &inst,
-                p: pop[i].clone(),
-            };
-            cross.cross(&a, &b, &mut child, &mut rng);
-            children[i] = child.p;
-        }
-        let t = Instant::now();
-        let child_costs = improver.improve(&mut children, iters, rng.random());
-        trace.batch(
-            generation,
-            &inst,
-            &children,
-            &child_costs,
-            t.elapsed().as_secs_f64(),
-        );
-        // one-to-one selection: a child replaces its first parent if better
-        for i in 0..population {
-            if child_costs[i] < costs[i] {
-                std::mem::swap(&mut pop[i], &mut children[i]);
-                (costs[i], since[i]) = (child_costs[i], 0);
-            } else {
-                since[i] += 1;
+            // one-to-one selection: a child replaces its first parent if better
+            for i in 0..population {
+                if child_costs[i] < costs[i] {
+                    std::mem::swap(&mut pop[i], &mut children[i]);
+                    (costs[i], since[i]) = (child_costs[i], 0);
+                } else {
+                    since[i] += 1;
+                }
             }
         }
     }
@@ -1133,8 +1343,13 @@ fn save(out: &str, cost: C, p: &[usize], best_known: Option<C>) {
 }
 
 #[cfg(feature = "gpu")]
-fn gpu_improver<'a>(inst: &'a Instance, p: usize, threads: u32) -> Box<dyn Improver + 'a> {
-    Box::new(gpu::GpuRots::new(inst, p, threads).unwrap_or_else(|e| panic!("GPU: {e}")))
+fn gpu_improver<'a>(
+    inst: &'a Instance,
+    p: usize,
+    threads: u32,
+    params: RotsParams,
+) -> Box<dyn Improver + 'a> {
+    Box::new(gpu::GpuRots::new(inst, p, threads, params).unwrap_or_else(|e| panic!("GPU: {e}")))
 }
 
 #[cfg(feature = "gpu")]
@@ -1148,7 +1363,7 @@ fn gpu_kopt(_: &Instance, _: u32) -> Box<dyn KOpt> {
 }
 
 #[cfg(not(feature = "gpu"))]
-fn gpu_improver<'a>(_: &'a Instance, _: usize, _: u32) -> Box<dyn Improver + 'a> {
+fn gpu_improver<'a>(_: &'a Instance, _: usize, _: u32, _: RotsParams) -> Box<dyn Improver + 'a> {
     panic!("built without the GPU: rebuild with --features gpu, or run with --cpu")
 }
 
