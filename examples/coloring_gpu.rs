@@ -57,7 +57,7 @@ use std::io::Write;
 use std::time::Instant;
 
 /// The conflict table's counters on the GPU: 16 bits, or 8 bits (saturating
-/// at 255, with a warning) so that larger graphs fit shared memory.
+/// at 255, which fails the run) so that larger graphs fit shared memory.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Table {
     /// 16 bits in shared memory if they fit, else 8 bits if those fit, else
@@ -131,7 +131,7 @@ __device__ __forceinline__ unsigned int xs(unsigned int &s) {
 }
 
 // one more neighbour of a colour; an 8-bit counter saturates at 255 and
-// raises the block's overflow flag (the host warns, the recount checks)
+// raises the block's overflow flag (the host fails the run)
 template <typename G>
 __device__ __forceinline__ void bump(G* x, int* overflow) {
     if (sizeof(G) == 1 && *x == (G)255) *overflow = 1;
@@ -465,11 +465,14 @@ extern "C" __global__ void tabucol8(
                 .iter()
                 .filter(|&&o| o != 0)
                 .count();
-            if saturated > 0 {
-                eprintln!(
-                    "warning: the 8-bit conflict table saturated in {saturated} blocks this batch"
-                );
-            }
+            // a saturated counter makes that block's table wrong from then on
+            // (a 256 counted as 255 later decrements to 254): fail the run
+            // rather than let a drifted cost reach a result
+            assert!(
+                saturated == 0,
+                "the 8-bit conflict table saturated in {saturated} blocks this batch; \
+                 rerun with --table 16"
+            );
             self.stream.memcpy_dtoh(&self.best, &mut self.host)?;
             let costs = self.stream.clone_dtoh(&self.cost)?;
             for (i, col) in batch.iter_mut().enumerate() {

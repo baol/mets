@@ -18,3 +18,12 @@ for A2.6, the 8-bit conflict table (implemented in the next commit: the
 table is n·k = 82 KB, and with the colouring and the conflict list it fits
 the 99 KB opt-in at one block per SM). The comparison to run: the same
 smoke test with `--table 8` against this one.
+
+## Saturation fails the run (per the plan's review)
+
+Since the commit after `276c30b`, a batch in which any block's 8-bit
+counter saturated aborts `coloring_gpu` with "the 8-bit conflict table
+saturated in N blocks this batch; rerun with --table 16", instead of a
+warning. After saturation a block's table is wrong (a 256 counted as 255
+decrements to 254), so no result may come from it. On these graphs γ is
+about 6, so the check is not expected to fire.
