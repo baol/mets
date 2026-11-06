@@ -118,7 +118,10 @@ def verify(vrp, sol, real=None):
     assert depot == 0, "the .sol numbering assumes the depot is the first node"
     cap = float(spec["CAPACITY"])
     max_len = float(spec["DISTANCE"]) if "DISTANCE" in spec else None
-    service = {index[int(r[0])]: float(r[1]) for r in sections.get("SERVICE_TIME_SECTION", [])}
+    service = {}
+    if "SERVICE_TIME" in spec:  # one service time for every customer (CMT)
+        service = {i: float(spec["SERVICE_TIME"]) for i in range(1, n)}
+    service.update({index[int(r[0])]: float(r[1]) for r in sections.get("SERVICE_TIME_SECTION", [])})
     windows = {index[int(r[0])]: (float(r[1]), float(r[2])) for r in sections.get("TIME_WINDOW_SECTION", [])}
     routes, claimed = read_sol(sol)
     problems = []
