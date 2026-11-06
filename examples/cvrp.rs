@@ -7,7 +7,8 @@
 //! feasible solution, route refinement every 200 iterations) in an
 //! `Adjusting` hook. Insertion is best insertion between consecutive
 //! customers (the paper's time-window variant) or, with `--insertion geni`,
-//! GENI types I and II (`common/geni.rs`); removal is by reconnection.
+//! GENI types I and II (`common/geni.rs`); removal is by reconnection or,
+//! with `--removal unstring`, GENI's unstringing (types I and II).
 //!
 //! Per phase: δ, ζ uniform in [0, 1] and the tenure uniform in
 //! [0, ⌈√(n·m)⌉] are drawn; the tabu search runs until the best feasible
@@ -18,7 +19,8 @@
 //!
 //! usage:
 //!   cvrp FILE.vrp [FILE.sol] [--eta N] [--seed S] [--vehicles M | --no-spare] [--max-seconds T]
-//!        [--insertion best|geni] [--geni-p P]   (default best; P = 5)
+//!        [--insertion best|geni] [--removal reconnect|unstring] [--geni-p P]
+//!        (defaults best, reconnect; P = 5 for both GENI insertion and unstringing)
 //!       solve; the best feasible solution is saved as NAME.sol (CVRPLIB format,
 //!       or the first free NAME.2.sol, …); a .sol gives the gap to its cost and,
 //!       by default, the fleet size (its routes, plus one spare vehicle)
@@ -78,6 +80,7 @@ fn its(
     max_seconds: f64,
     reference: Option<f64>,
     geni_p: usize,
+    unstring_p: usize,
 ) -> (f64, Vec<Vec<usize>>) {
     let n = inst.n;
     let t0 = Instant::now();
@@ -117,7 +120,7 @@ fn its(
         let mut st = State::new(s.clone(), rng.random());
         let (score_mem, hook_mem, stop_mem) = (mem.clone(), mem.clone(), mem.clone());
         let tabu = TabuSearch::new(
-            InterRoute::new(geni_p),
+            InterRoute::with_unstring(geni_p, unstring_p),
             DenseTabu::new(Tenure::Random(0..=tau_max)),
         )
         .with_aspiration(AttributeAspiration(mem.clone()))
@@ -225,10 +228,16 @@ fn main() {
     let seed: u64 = args.value("--seed").unwrap_or(1);
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(f64::INFINITY);
     let vehicles: Option<usize> = args.value("--vehicles");
+    let p: usize = args.value("--geni-p").unwrap_or(5);
     let geni_p = match args.value::<String>("--insertion").as_deref() {
         None | Some("best") => 0,
-        Some("geni") => args.value("--geni-p").unwrap_or(5),
+        Some("geni") => p,
         Some(x) => panic!("--insertion best|geni, not {x:?}"),
+    };
+    let unstring_p = match args.value::<String>("--removal").as_deref() {
+        None | Some("reconnect") => 0,
+        Some("unstring") => p,
+        Some(x) => panic!("--removal reconnect|unstring, not {x:?}"),
     };
     // default fleet: the reference routes (or the load bound) plus one spare
     let spare = if args.flag("--no-spare") { 0 } else { 1 };
@@ -248,21 +257,35 @@ fn main() {
         reference.as_ref().map_or(lower, |r| r.0.len()).max(lower) + spare
     });
     let ref_cost = reference.as_ref().and_then(|r| r.1);
+    let insertion = if geni_p > 0 {
+        format!("GENI insertion, p = {geni_p}")
+    } else {
+        "best insertion".to_string()
+    };
+    let removal = if unstring_p > 0 {
+        format!("unstringing removal, p = {unstring_p}")
+    } else {
+        "removal by reconnection".to_string()
+    };
     println!(
-        "{}: {} customers, capacity {}, {}route limit, {m} vehicles; {}; η = {eta}, seed {seed}; build {}",
+        "{}: {} customers, capacity {}, {}route limit, {m} vehicles; {insertion}, {removal}; η = {eta}, seed {seed}; build {}",
         inst.name,
         inst.n - 1,
         inst.capacity,
         inst.max_duration.map_or("no ".to_string(), |d| format!("{d} ")),
-        if geni_p > 0 {
-            format!("GENI insertion, p = {geni_p}")
-        } else {
-            "best insertion".to_string()
-        },
         env!("METS_GIT_HASH")
     );
     let t0 = Instant::now();
-    let (dist, routes) = its(&inst, m, eta, seed, max_seconds, ref_cost, geni_p);
+    let (dist, routes) = its(
+        &inst,
+        m,
+        eta,
+        seed,
+        max_seconds,
+        ref_cost,
+        geni_p,
+        unstring_p,
+    );
     let secs = t0.elapsed().as_secs_f64();
     if routes.is_empty() {
         println!("{}: no feasible solution in {secs:.1} s", inst.name);
@@ -422,6 +445,7 @@ mod tests {
                 to,
                 after,
                 geni: None,
+                us: None,
             };
             let expected = m.delta_of(&s);
             let before = s.cost();
@@ -482,6 +506,7 @@ mod tests {
                         to,
                         after: c,
                         geni: Some(g),
+                        us: None,
                     };
                     let expected = m.delta_of(&s);
                     let mut t = s.clone();
@@ -508,53 +533,130 @@ mod tests {
         assert!(tried.iter().all(|&x| x > 0), "every kind tried: {tried:?}");
     }
 
-    /// The GENI neighbourhood's deltas agree with full evaluations along a
-    /// search, as the plain one's do.
+    /// Unstring relocations out of routes of 1, 2, 3, 4, 5 and 14 customers:
+    /// every valid unstringing of every type, both orientations, for every
+    /// customer of the route, with plain and GENI insertion into another
+    /// route; deltas against full evaluations, tables against a rebuild.
     #[test]
-    fn geni_neighbourhood_deltas_along_a_search() {
-        let inst = instance(30, 6);
-        let mut rng = DefaultRng::seed_from_u64(7);
+    fn unstring_relocations_from_routes_of_every_small_size() {
+        let inst = instance(30, 8);
         let pen = Penalties {
             capacity: 3.0,
             duration: 2.0,
         };
-        let mut s = Evaluated::new(Routes::with_vehicles(
-            &inst,
-            sweep(&inst, 6, &mut rng).routes(),
-            7,
-            pen,
-        ));
-        let mut hood = InterRoute::new(5);
-        let saved = s.clone();
-        for step in 0..60 {
-            if step == 40 {
-                // return to an earlier solution, as the search does to s*
-                s = saved.clone();
+        let mut routes: Vec<Vec<usize>> = Vec::new();
+        let mut next = 1;
+        for size in [1, 2, 3, 4, 5, 14] {
+            routes.push((next..next + size).collect());
+            next += size;
+        }
+        let s = Evaluated::new(Routes::with_vehicles(&inst, routes, 7, pen));
+        let d = |a: usize, b: usize| s.d(a, b);
+        let mut tried = [0usize; 3];
+        for from in 0..6 {
+            let tour = s.tour(from);
+            for &c in &tour[1..] {
+                for to in [(from + 1) % 6, 6] {
+                    let target = s.tour(to);
+                    let g = vrp::geni::best(&target, c, 5, &d);
+                    for mut u in vrp::geni::unstring_moves(tour.len()) {
+                        let o = vrp::geni::oriented(&tour, u.rev);
+                        let p = o.iter().position(|&x| x == c).unwrap();
+                        u.delta = vrp::geni::unstring_delta(&o, p, &u, &d);
+                        tried[u.kind as usize] += 1;
+                        let (after, geni) = if g.kind == 0 {
+                            (target[g.i as usize], None)
+                        } else {
+                            (c, Some(g))
+                        };
+                        let m = Relocate {
+                            c,
+                            to,
+                            after,
+                            geni,
+                            us: Some(u),
+                        };
+                        let expected = m.delta_of(&s);
+                        let mut t = s.clone();
+                        t.apply(&m);
+                        let fresh = t.evaluate();
+                        assert!(
+                            (fresh - (s.cost() + expected)).abs() < 1e-6,
+                            "from a route of {} customers, {u:?}: delta {expected} vs {}",
+                            tour.len() - 1,
+                            fresh - s.cost()
+                        );
+                        assert_eq!(t.route[c] as usize, to);
+                        assert_eq!(t.customers(from).len(), tour.len() - 2);
+                        let mut tables = (*t).clone();
+                        tables.rebuild();
+                        for k in 0..t.m {
+                            assert!((tables.length[k] - t.length[k]).abs() < 1e-6);
+                            assert!((tables.load[k] - t.load[k]).abs() < 1e-9);
+                            assert_eq!(tables.size[k], t.size[k]);
+                        }
+                    }
+                }
             }
-            // the cached neighbourhood visits exactly what a fresh one does
-            let visits = |h: &mut InterRoute, s: &Evaluated<Routes>| {
-                let mut out = Vec::new();
-                let _ = h.explore(s, &mut |m: Relocate, d: f64| {
-                    out.push((m.c, m.to, m.after, m.geni, d));
-                    std::ops::ControlFlow::<()>::Continue(())
-                });
-                out
+        }
+        assert!(tried.iter().all(|&x| x > 0), "every kind tried: {tried:?}");
+    }
+
+    /// The GENI neighbourhood's deltas agree with full evaluations along a
+    /// search, as the plain one's do.
+    #[test]
+    fn geni_neighbourhood_deltas_along_a_search() {
+        // GENI insertion alone, unstringing alone, and both
+        for (gp, up) in [(5, 0), (0, 5), (5, 5), (2, 3)] {
+            let inst = instance(30, 6);
+            let mut rng = DefaultRng::seed_from_u64(7);
+            let pen = Penalties {
+                capacity: 3.0,
+                duration: 2.0,
             };
-            assert_eq!(
-                visits(&mut hood, &s),
-                visits(&mut InterRoute::new(5), &s),
-                "step {step}"
-            );
-            assert!(check::deltas(&mut hood, &s).is_empty(), "step {step}");
-            // apply a random visited move
-            let mut all = Vec::new();
-            let _ = hood.explore(&s, &mut |m: Relocate, _d: f64| {
-                all.push(m);
-                std::ops::ControlFlow::<()>::Continue(())
-            });
-            let m = all[rng.random_range(0..all.len())];
-            s.apply(&m);
-            assert!((s.cost() - s.evaluate()).abs() < 1e-6);
+            let mut s = Evaluated::new(Routes::with_vehicles(
+                &inst,
+                sweep(&inst, 6, &mut rng).routes(),
+                7,
+                pen,
+            ));
+            let mut hood = InterRoute::with_unstring(gp, up);
+            let saved = s.clone();
+            for step in 0..60 {
+                if step == 40 {
+                    // return to an earlier solution, as the search does to s*
+                    s = saved.clone();
+                }
+                // the cached neighbourhood visits exactly what a fresh one does
+                let visits = |h: &mut InterRoute, s: &Evaluated<Routes>| {
+                    let mut out = Vec::new();
+                    let _ = h.explore(s, &mut |m: Relocate, d: f64| {
+                        out.push((m.c, m.to, m.after, m.geni, m.us, d));
+                        std::ops::ControlFlow::<()>::Continue(())
+                    });
+                    out
+                };
+                let all = visits(&mut hood, &s);
+                assert_eq!(
+                    all,
+                    visits(&mut InterRoute::with_unstring(gp, up), &s),
+                    "({gp}, {up}) step {step}"
+                );
+                assert!(
+                    check::deltas(&mut hood, &s).is_empty(),
+                    "({gp}, {up}) step {step}"
+                );
+                // apply a random visited move
+                let (c, to, after, geni, us, _) = all[rng.random_range(0..all.len())];
+                s.apply(&Relocate {
+                    c,
+                    to,
+                    after,
+                    geni,
+                    us,
+                });
+                assert!((s.cost() - s.evaluate()).abs() < 1e-6);
+            }
         }
     }
 

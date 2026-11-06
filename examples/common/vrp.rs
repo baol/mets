@@ -20,7 +20,7 @@ fn fresh_version() -> u64 {
 
 #[path = "geni.rs"]
 pub mod geni;
-use geni::Geni;
+use geni::{Geni, Unstring};
 
 /// Euclidean distances: rounded to the nearest integer, or real.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -528,6 +528,22 @@ impl<'a> Routes<'a> {
         t
     }
 
+    /// Take customer c off its route by the unstringing u, evaluated on its
+    /// route's `tour`; route tables updated.
+    pub fn remove_unstring(&mut self, c: usize, u: &Unstring) {
+        let k = self.route[c] as usize;
+        let tour = self.tour(k);
+        let cycle = geni::unstring(&tour, c, u);
+        debug_assert_eq!(cycle[0], self.inst.n + k);
+        self.load[k] -= self.inst.demand[c];
+        self.service[k] -= self.inst.service[c];
+        self.size[k] -= 1;
+        self.route[c] = u32::MAX;
+        self.relink(k, &cycle[1..]);
+        self.succ[c] = c as u32;
+        self.pred[c] = c as u32;
+    }
+
     /// Put customer c (off every route) into route k by the GENI move g,
     /// evaluated on `self.tour(k)`; route tables updated.
     pub fn put_geni(&mut self, c: usize, k: usize, g: &Geni) {
@@ -698,6 +714,9 @@ pub struct Relocate {
     pub to: usize,
     pub after: usize,
     pub geni: Option<Geni>,
+    /// With `us`, the removal from the customer's route is that unstringing
+    /// (on its tour as evaluated) instead of reconnection.
+    pub us: Option<Unstring>,
 }
 
 impl<'a> Relocate {
@@ -707,7 +726,10 @@ impl<'a> Relocate {
         let (c, a) = (self.c, self.after);
         let from = s.route[c] as usize;
         let (p, q) = (s.pred[c] as usize, s.succ[c] as usize);
-        let removed = s.d(p, q) - s.d(p, c) - s.d(c, q);
+        let removed = match self.us {
+            Some(u) => u.delta,
+            None => s.d(p, q) - s.d(p, c) - s.d(c, q),
+        };
         if from == self.to {
             // same route: remove, then insert (a is not c)
             let b = if s.succ[a] as usize == c {
@@ -747,7 +769,10 @@ impl<'a> Relocate {
 impl<'a> Move<Routes<'a>> for Relocate {
     fn apply(&self, s: &mut Routes<'a>) {
         let from = s.route[self.c] as usize;
-        s.remove(self.c);
+        match self.us {
+            Some(u) => s.remove_unstring(self.c, &u),
+            None => s.remove(self.c),
+        }
         match self.geni {
             Some(g) => s.put_geni(self.c, self.to, &g),
             None => s.put(self.c, self.after),
@@ -785,17 +810,26 @@ impl<'a> DenseAttr<Routes<'a>> for Relocate {
 /// II, p-neighbourhoods of that size, plain insertion included). The best
 /// GENI insertion of c into route k depends only on k's sequence, so it is
 /// cached per (c, k) under the route's version: a move recomputes two
-/// routes' entries, not m.
+/// routes' entries, not m. With `unstring_p` > 0 the removal is the best
+/// unstringing (GENI's US, types I and II, plain reconnection included),
+/// cached per customer the same way.
 pub struct InterRoute {
     pub geni_p: usize,
+    pub unstring_p: usize,
     cache: Vec<(u64, Geni)>,
+    removal: Vec<(u64, Unstring)>,
 }
 
 impl InterRoute {
     pub fn new(geni_p: usize) -> Self {
+        Self::with_unstring(geni_p, 0)
+    }
+    pub fn with_unstring(geni_p: usize, unstring_p: usize) -> Self {
         InterRoute {
             geni_p,
+            unstring_p,
             cache: Vec::new(),
+            removal: Vec::new(),
         }
     }
 }
@@ -837,13 +871,45 @@ impl<'a> Neighborhood<Routes<'a>> for InterRoute {
                 }
             }
         }
+        if self.unstring_p > 0 {
+            let plain = Unstring {
+                kind: 0,
+                rev: false,
+                q: 0,
+                r: 0,
+                s: 0,
+                delta: 0.0,
+            };
+            self.removal.resize(n, (0, plain));
+            for k in 0..m {
+                if s.size[k] == 0
+                    || (1..n).all(|c| s.route[c] as usize != k || self.removal[c].0 == s.version[k])
+                {
+                    continue;
+                }
+                let tour = s.tour(k);
+                let near = geni::Near::new(&tour, self.unstring_p, &d);
+                for &c in &tour[1..] {
+                    if self.removal[c].0 != s.version[k] {
+                        let u = geni::best_unstring(&tour, &near, c, self.unstring_p, &d);
+                        self.removal[c] = (s.version[k], u);
+                    }
+                }
+            }
+        }
         for c in 1..n {
             let from = s.route[c] as usize;
+            // plain removal is reconnection, the default
+            let us = if self.unstring_p > 0 {
+                Some(self.removal[c].1).filter(|u| u.kind != 0)
+            } else {
+                None
+            };
             for k in 0..m {
                 if k == from || (s.size[k] == 0 && Some(k) != first_empty) {
                     continue;
                 }
-                let m = if self.geni_p > 0 {
+                let mut m = if self.geni_p > 0 {
                     let g = self.cache[c * s.m + k].1;
                     if g.kind == 0 {
                         Relocate {
@@ -851,6 +917,7 @@ impl<'a> Neighborhood<Routes<'a>> for InterRoute {
                             to: k,
                             after: g.i as usize,
                             geni: None,
+                            us: None,
                         }
                     } else {
                         Relocate {
@@ -858,6 +925,7 @@ impl<'a> Neighborhood<Routes<'a>> for InterRoute {
                             to: k,
                             after: c,
                             geni: Some(g),
+                            us: None,
                         }
                     }
                 } else {
@@ -867,8 +935,10 @@ impl<'a> Neighborhood<Routes<'a>> for InterRoute {
                         to: k,
                         after,
                         geni: None,
+                        us: None,
                     }
                 };
+                m.us = us;
                 vis.visit(m, m.delta_of(s))?;
             }
         }

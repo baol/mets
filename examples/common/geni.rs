@@ -337,6 +337,249 @@ pub fn best_with(
     best
 }
 
+/// Removal of a vertex v from a tour by unstringing (GENI's US), derived
+/// as the inverse of the insertion types above. With o the tour in the
+/// orientation `rev`, v at position p and o_x = o[(p + x) mod L] (offsets:
+/// o_0 = v, a = o_{L−1} its predecessor):
+///
+/// * plain: a → o_1.
+/// * type I (1 ≤ q < r ≤ L − 2), the inverse of insertion type I:
+///   a, o_q … o_1, o_r … o_{q+1}, o_{r+1} … o_{L−2}; deletes (a, v),
+///   (v, o_1), (o_q, o_{q+1}), (o_r, o_{r+1}); adds (a, o_q), (o_1, o_r),
+///   (o_{q+1}, o_{r+1}).
+/// * type II (1 ≤ q < r < s ≤ L − 2), the inverse of insertion type II:
+///   a, o_s … o_{r+1}, o_q … o_1, o_{q+1} … o_r, o_{s+1} … o_{L−2}; deletes
+///   (a, v), (v, o_1), (o_q, o_{q+1}), (o_r, o_{r+1}), (o_s, o_{s+1}); adds
+///   (a, o_s), (o_{r+1}, o_q), (o_1, o_{q+1}), (o_r, o_{s+1}).
+///
+/// The search takes o_q (type I) and o_s (type II) among the p nearest to
+/// a, o_r (type I) and o_{q+1} (type II) among the p nearest to o_1, and
+/// o_r (type II) among the p nearest to o_{s+1}.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Unstring {
+    /// 0 plain, 1 type I, 2 type II.
+    pub kind: u8,
+    pub rev: bool,
+    pub q: u32,
+    pub r: u32,
+    pub s: u32,
+    /// Length change of the tour (usually negative).
+    pub delta: f64,
+}
+
+/// Whether (q, r) is a type I unstringing on a tour of len nodes (v included).
+pub fn valid_us1(len: usize, q: usize, r: usize) -> bool {
+    1 <= q && q < r && r + 2 <= len
+}
+
+/// Whether (q, r, s) is a type II unstringing on a tour of len nodes.
+pub fn valid_us2(len: usize, q: usize, r: usize, s: usize) -> bool {
+    1 <= q && q < r && r < s && s + 2 <= len
+}
+
+/// Length change of an unstringing on the oriented tour o, v at position p.
+pub fn unstring_delta(
+    o: &[usize],
+    p: usize,
+    u: &Unstring,
+    d: &impl Fn(usize, usize) -> f64,
+) -> f64 {
+    let n = o.len();
+    let at = |x: usize| o[(p + x) % n];
+    let (v, a, o1) = (at(0), at(n - 1), at(1));
+    let (q, r, s) = (u.q as usize, u.r as usize, u.s as usize);
+    let cut = d(a, v) + d(v, o1);
+    match u.kind {
+        0 => d(a, o1) - cut,
+        1 => {
+            d(a, at(q)) + d(o1, at(r)) + d(at(q + 1), at(r + 1))
+                - cut
+                - d(at(q), at(q + 1))
+                - d(at(r), at(r + 1))
+        }
+        _ => {
+            d(a, at(s)) + d(at(r + 1), at(q)) + d(o1, at(q + 1)) + d(at(r), at(s + 1))
+                - cut
+                - d(at(q), at(q + 1))
+                - d(at(r), at(r + 1))
+                - d(at(s), at(s + 1))
+        }
+    }
+}
+
+/// The cycle after removing v from t (v ≠ t[0]) by u, rotated so that
+/// t[0] is first.
+pub fn unstring(t: &[usize], v: usize, u: &Unstring) -> Vec<usize> {
+    let o = oriented(t, u.rev);
+    let n = o.len();
+    let p = o.iter().position(|&x| x == v).expect("v on the tour");
+    let at = |x: usize| o[(p + x) % n];
+    let (q, r, s) = (u.q as usize, u.r as usize, u.s as usize);
+    let mut out = vec![at(n - 1)];
+    let span = |out: &mut Vec<usize>, from: usize, to: usize, back: bool| {
+        // offsets from..=to, forward or backward (empty if from > to)
+        if from <= to {
+            if back {
+                out.extend((from..=to).rev().map(at));
+            } else {
+                out.extend((from..=to).map(at));
+            }
+        }
+    };
+    match u.kind {
+        0 => span(&mut out, 1, n - 2, false),
+        1 => {
+            span(&mut out, 1, q, true);
+            span(&mut out, q + 1, r, true);
+            span(&mut out, r + 1, n - 2, false);
+        }
+        _ => {
+            span(&mut out, r + 1, s, true);
+            span(&mut out, 1, q, true);
+            span(&mut out, q + 1, r, false);
+            span(&mut out, s + 1, n - 2, false);
+        }
+    }
+    let first = out
+        .iter()
+        .position(|&x| x == t[0])
+        .expect("t[0] on the tour");
+    out.rotate_left(first);
+    out
+}
+
+/// Every valid unstringing on a tour of len nodes, both orientations.
+pub fn unstring_moves(len: usize) -> Vec<Unstring> {
+    let u0 = Unstring {
+        kind: 0,
+        rev: false,
+        q: 0,
+        r: 0,
+        s: 0,
+        delta: 0.0,
+    };
+    let mut out = Vec::new();
+    for rev in [false, true] {
+        out.push(Unstring { rev, ..u0 });
+        for q in 0..len {
+            for r in 0..len {
+                if valid_us1(len, q, r) {
+                    out.push(Unstring {
+                        kind: 1,
+                        rev,
+                        q: q as u32,
+                        r: r as u32,
+                        ..u0
+                    });
+                }
+                for s in 0..len {
+                    if valid_us2(len, q, r, s) {
+                        out.push(Unstring {
+                            kind: 2,
+                            rev,
+                            q: q as u32,
+                            r: r as u32,
+                            s: s as u32,
+                            ..u0
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The best (least delta) removal of v from t (v ≠ t[0]): plain, and types I
+/// and II over the p-neighbourhoods (`near` built for t, v included).
+pub fn best_unstring(
+    t: &[usize],
+    near: &Near,
+    v: usize,
+    p: usize,
+    d: &impl Fn(usize, usize) -> f64,
+) -> Unstring {
+    let n = t.len();
+    let pos = t.iter().position(|&x| x == v).expect("v on the tour");
+    let mut best = Unstring {
+        kind: 0,
+        rev: false,
+        q: 0,
+        r: 0,
+        s: 0,
+        delta: 0.0,
+    };
+    best.delta = unstring_delta(t, pos, &best, d);
+    if n < 4 || p == 0 {
+        return best;
+    }
+    let w = near.width;
+    for rev in [false, true] {
+        let map = |x: usize| if rev { (n - x) % n } else { x };
+        let o = oriented(t, rev);
+        let po = map(pos);
+        // offsets from v of the nearest nodes to the node at offset x
+        let off = |x: usize| {
+            let f = map((po + x) % n);
+            near.rows[f * w..][..w]
+                .iter()
+                .map(move |&y| (map(y as usize) + n - po) % n)
+                .filter(|&y| y != 0)
+        };
+        let try_ = |best: &mut Unstring, u: Unstring| {
+            let dl = unstring_delta(&o, po, &u, d);
+            if dl < best.delta {
+                *best = Unstring { delta: dl, ..u };
+            }
+        };
+        let u0 = Unstring {
+            kind: 1,
+            rev,
+            q: 0,
+            r: 0,
+            s: 0,
+            delta: 0.0,
+        };
+        for q in off(n - 1) {
+            for r in off(1) {
+                if valid_us1(n, q, r) {
+                    try_(
+                        &mut best,
+                        Unstring {
+                            q: q as u32,
+                            r: r as u32,
+                            ..u0
+                        },
+                    );
+                }
+            }
+        }
+        for s in off(n - 1) {
+            for q1 in off(1) {
+                let q = q1.wrapping_sub(1);
+                if q >= n {
+                    continue;
+                }
+                for r in off(s + 1) {
+                    if valid_us2(n, q, r, s) {
+                        try_(
+                            &mut best,
+                            Unstring {
+                                kind: 2,
+                                q: q as u32,
+                                r: r as u32,
+                                s: s as u32,
+                                ..u0
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +813,177 @@ mod tests {
                     .fold(f64::INFINITY, f64::min);
                 assert!(g.added <= plain + 1e-9);
                 check(&t, len, &g, &d);
+            }
+        }
+    }
+
+    /// The arcs an unstringing should delete and add, from its definition.
+    fn us_spec(o: &[usize], p: usize, u: &Unstring) -> (Vec<(usize, usize)>, Vec<(usize, usize)>) {
+        let n = o.len();
+        let at = |x: usize| o[(p + x) % n];
+        let (v, a, o1) = (at(0), at(n - 1), at(1));
+        let (q, r, s) = (u.q as usize, u.r as usize, u.s as usize);
+        let mut del = vec![(a, v), (v, o1)];
+        let add = match u.kind {
+            0 => vec![(a, o1)],
+            1 => {
+                del.extend([(at(q), at(q + 1)), (at(r), at(r + 1))]);
+                vec![(a, at(q)), (o1, at(r)), (at(q + 1), at(r + 1))]
+            }
+            _ => {
+                del.extend([(at(q), at(q + 1)), (at(r), at(r + 1)), (at(s), at(s + 1))]);
+                vec![
+                    (a, at(s)),
+                    (at(r + 1), at(q)),
+                    (o1, at(q + 1)),
+                    (at(r), at(s + 1)),
+                ]
+            }
+        };
+        (del, add)
+    }
+
+    /// Check one valid unstringing: a cycle through t without v, t[0]
+    /// first, the defined arcs, and `unstring_delta` equal to the length change.
+    fn check_us(t: &[usize], v: usize, u: &Unstring, d: &impl Fn(usize, usize) -> f64) {
+        let c = unstring(t, v, u);
+        let mut sorted = c.clone();
+        sorted.sort();
+        let mut want: Vec<usize> = t.iter().copied().filter(|&x| x != v).collect();
+        want.sort();
+        assert_eq!(sorted, want, "{u:?} on {t:?} removing {v}: {c:?}");
+        assert_eq!(c[0], t[0]);
+        let o = oriented(t, u.rev);
+        let p = o.iter().position(|&x| x == v).unwrap();
+        let (del, add) = us_spec(&o, p, u);
+        let mut expect = arcs(&o);
+        for (a, b) in del {
+            let e = expect.entry((a.min(b), a.max(b))).or_insert(0);
+            *e -= 1;
+            assert!(*e >= 0, "{u:?} on {o:?}: deletes ({a}, {b}), not an arc");
+        }
+        for (a, b) in add {
+            *expect.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+        expect.retain(|_, &mut x| x != 0);
+        if c.len() >= 2 {
+            assert_eq!(arcs(&c), expect, "{u:?} on {o:?}: arcs of {c:?}");
+        }
+        let delta = length(&c, d) - length(t, d);
+        let dl = unstring_delta(&o, p, u, d);
+        assert!(
+            (dl - delta).abs() < 1e-9,
+            "{u:?} on {t:?}: delta {dl}, length change {delta}"
+        );
+    }
+
+    /// Tours of 2 to 10 nodes (a route of 1 to 9 customers, v among them),
+    /// v at every position but the depot's, every valid unstringing in both
+    /// orientations: every offset at its smallest and largest value, next
+    /// to the others, and wrapping round past the depot.
+    #[test]
+    fn every_unstringing_on_small_tours() {
+        for len in 2..=10 {
+            for seed in 0..2 {
+                let d = points(len, 300 + 10 * len as u64 + seed);
+                let t: Vec<usize> = (0..len).collect();
+                let moves = unstring_moves(len);
+                let (n1, n2) = (
+                    moves.iter().filter(|u| u.kind == 1).count(),
+                    moves.iter().filter(|u| u.kind == 2).count(),
+                );
+                // type I needs v, a and two segments; type II three segments
+                assert_eq!(n1 > 0, len >= 4, "type I unstringing on {len} nodes");
+                assert_eq!(n2 > 0, len >= 5, "type II unstringing on {len} nodes");
+                for u in &moves {
+                    let (q, r, s) = (u.q as usize, u.r as usize, u.s as usize);
+                    match u.kind {
+                        1 => assert!(valid_us1(len, q, r)),
+                        2 => assert!(valid_us2(len, q, r, s)),
+                        _ => {}
+                    }
+                }
+                if len >= 5 {
+                    for (kind, get) in [(1u8, 0usize), (1, 1), (2, 0), (2, 1), (2, 2)] {
+                        let vals: Vec<u32> = moves
+                            .iter()
+                            .filter(|u| u.kind == kind)
+                            .map(|u| [u.q, u.r, u.s][get])
+                            .collect();
+                        let (lo, hi) = (*vals.iter().min().unwrap(), *vals.iter().max().unwrap());
+                        // q from 1; r up to L − 2 for type I, s up to L − 2 for type II
+                        assert_eq!(lo as usize, 1 + get, "type {kind} offset {get} smallest");
+                        assert_eq!(
+                            hi as usize,
+                            len - 2 - if kind == 1 { 1 - get } else { 2 - get }
+                        );
+                    }
+                }
+                for v in 1..len {
+                    for u in &moves {
+                        check_us(&t, v, u, &d);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Unstringing undoes insertion: for every insertion of v (types I and
+    /// II) on tours of 3 to 8 nodes, an unstringing of the same type gives
+    /// back the original cycle (as a set of arcs).
+    #[test]
+    fn unstringing_inverts_insertion() {
+        for len in 3..=8 {
+            let t: Vec<usize> = (0..len).collect();
+            let v = len;
+            let target = arcs(&t);
+            for g in moves(len) {
+                let c = apply(&t, v, &g);
+                let undone = unstring_moves(c.len())
+                    .into_iter()
+                    .filter(|u| u.kind == g.kind)
+                    .any(|u| arcs(&unstring(&c, v, &u)) == target);
+                assert!(
+                    undone,
+                    "{g:?} on {len} nodes: no type {} unstringing restores it",
+                    g.kind
+                );
+            }
+        }
+    }
+
+    /// With p at least the tour length, `best_unstring` is the exhaustive
+    /// minimum; with a small p its choice is still a correct removal.
+    #[test]
+    fn best_unstring_against_brute_force() {
+        for len in 2..=10 {
+            for seed in 0..3 {
+                let d = points(len, 700 + 10 * len as u64 + seed);
+                let t: Vec<usize> = (0..len).collect();
+                for v in 1..len {
+                    let brute = unstring_moves(len)
+                        .iter()
+                        .map(|u| {
+                            let o = oriented(&t, u.rev);
+                            let p = o.iter().position(|&x| x == v).unwrap();
+                            unstring_delta(&o, p, u, &d)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    let u = best_unstring(&t, &Near::new(&t, len, &d), v, len, &d);
+                    assert!((u.delta - brute).abs() < 1e-9, "{len} nodes, v = {v}");
+                    check_us(&t, v, &u, &d);
+                }
+            }
+        }
+        for len in [12, 30, 60] {
+            let d = points(len, 900 + len as u64);
+            let t: Vec<usize> = (0..len).collect();
+            for p in [1, 3, 5] {
+                let near = Near::new(&t, p, &d);
+                for v in [1, len / 2, len - 1] {
+                    let u = best_unstring(&t, &near, v, p, &d);
+                    check_us(&t, v, &u, &d);
+                }
             }
         }
     }
