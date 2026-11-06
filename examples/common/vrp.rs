@@ -32,6 +32,9 @@ pub struct Instance {
     /// Row-major n × n.
     pub dist: Vec<f64>,
     pub rounding: Option<Rounding>,
+    /// Coordinates, when the file gives them (for the sweep start and the
+    /// cluster perturbation's distances they are not needed: `dist` is).
+    pub xy: Option<Vec<(f64, f64)>>,
 }
 
 impl Instance {
@@ -138,6 +141,17 @@ impl Instance {
             w
         });
 
+        let xy = match sections.get("NODE_COORD_SECTION") {
+            Some(rows) if rows.len() == n => {
+                let mut xy = vec![(0.0, 0.0); n];
+                for r in rows {
+                    xy[index(r[0].parse().map_err(|e| format!("{e}"))?)?] =
+                        (num(&r[1])?, num(&r[2])?);
+                }
+                Some(xy)
+            }
+            _ => None,
+        };
         let kind = get("EDGE_WEIGHT_TYPE")?.as_str();
         let mut dist = vec![0.0; n * n];
         let mut used_rounding = None;
@@ -150,11 +164,9 @@ impl Instance {
                         Rounding::Nearest
                     });
                 used_rounding = Some(mode);
-                let mut xy = vec![(0.0, 0.0); n];
-                for r in section("NODE_COORD_SECTION") {
-                    xy[index(r[0].parse().map_err(|e| format!("{e}"))?)?] =
-                        (num(&r[1])?, num(&r[2])?);
-                }
+                let xy = xy
+                    .as_ref()
+                    .ok_or(format!("{}: EUC_2D without coordinates", path.display()))?;
                 for a in 0..n {
                     for b in 0..n {
                         let e = ((xy[a].0 - xy[b].0).powi(2) + (xy[a].1 - xy[b].1).powi(2)).sqrt();
@@ -212,6 +224,7 @@ impl Instance {
             windows,
             dist,
             rounding: used_rounding,
+            xy,
         })
     }
 }
@@ -262,58 +275,153 @@ impl Default for Penalties {
     }
 }
 
-/// A solution: one route per vehicle (customers, depot implicit at both ends),
-/// with each route's load, length and duration, and where each customer is.
+/// A solution with `m` routes (vehicles), some possibly empty, as linked
+/// lists over flat arrays (no allocation per move; the layout a GPU block
+/// would hold): customers are nodes 1..n−1, route k's depot is the sentinel
+/// node n + k, and each route is the cycle sentinel → c₁ → … → sentinel.
+/// Per route: load, length, service time and size. Relocating a customer is
+/// O(1) to evaluate and to apply.
 #[derive(Clone)]
 pub struct Routes<'a> {
     pub inst: &'a Instance,
-    pub routes: Vec<Vec<usize>>,
+    pub m: usize,
+    pub succ: Vec<u32>,
+    pub pred: Vec<u32>,
+    /// Route of each customer and sentinel.
+    pub route: Vec<u32>,
     pub load: Vec<f64>,
     pub length: Vec<f64>,
-    /// Length plus service times.
-    pub duration: Vec<f64>,
-    /// (route, position) of each customer; (usize::MAX, _) for the depot.
-    pub at: Vec<(usize, usize)>,
+    pub service: Vec<f64>,
+    pub size: Vec<u32>,
     pub penalties: Penalties,
+    /// (customer, from, to) of the last relocation, for the search's bookkeeping.
+    pub last: Option<(usize, usize, usize)>,
 }
 
 impl<'a> Routes<'a> {
+    /// `routes` are lists of customers (1..n−1); `m` ≥ their number
+    /// vehicles, the rest empty.
     pub fn new(inst: &'a Instance, routes: Vec<Vec<usize>>, penalties: Penalties) -> Self {
+        let m = routes.len();
+        Self::with_vehicles(inst, routes, m, penalties)
+    }
+
+    pub fn with_vehicles(
+        inst: &'a Instance,
+        routes: Vec<Vec<usize>>,
+        m: usize,
+        penalties: Penalties,
+    ) -> Self {
+        assert!(
+            m >= routes.len(),
+            "{} routes for {m} vehicles",
+            routes.len()
+        );
+        let n = inst.n;
+        let total = n + m;
         let mut s = Routes {
             inst,
-            routes,
-            load: Vec::new(),
-            length: Vec::new(),
-            duration: Vec::new(),
-            at: Vec::new(),
+            m,
+            succ: (0..total as u32).collect(),
+            pred: (0..total as u32).collect(),
+            route: vec![u32::MAX; total],
+            load: vec![0.0; m],
+            length: vec![0.0; m],
+            service: vec![0.0; m],
+            size: vec![0; m],
             penalties,
+            last: None,
         };
+        for k in 0..m {
+            s.route[n + k] = k as u32;
+        }
+        for (k, r) in routes.iter().enumerate() {
+            let mut prev = n + k;
+            for &c in r {
+                s.link(prev, c);
+                s.route[c] = k as u32;
+                prev = c;
+            }
+            s.link(prev, n + k);
+        }
         s.rebuild();
         s
     }
 
-    /// Recompute every per-route table and the position index.
-    pub fn rebuild(&mut self) {
-        let inst = self.inst;
-        self.at = vec![(usize::MAX, 0); inst.n];
-        self.load.clear();
-        self.length.clear();
-        self.duration.clear();
-        for (k, r) in self.routes.iter().enumerate() {
-            let mut prev = 0;
-            let (mut load, mut length, mut service) = (0.0, 0.0, 0.0);
-            for (p, &c) in r.iter().enumerate() {
-                self.at[c] = (k, p);
-                load += inst.demand[c];
-                length += inst.d(prev, c);
-                service += inst.service[c];
-                prev = c;
-            }
-            length += inst.d(prev, 0);
-            self.load.push(load);
-            self.length.push(length);
-            self.duration.push(length + service);
+    #[inline]
+    fn link(&mut self, a: usize, b: usize) {
+        self.succ[a] = b as u32;
+        self.pred[b] = a as u32;
+    }
+
+    /// The instance node of a list node (sentinels are the depot).
+    #[inline]
+    pub fn site(&self, x: usize) -> usize {
+        if x >= self.inst.n {
+            0
+        } else {
+            x
         }
+    }
+
+    #[inline]
+    pub fn d(&self, x: usize, y: usize) -> f64 {
+        self.inst.d(self.site(x), self.site(y))
+    }
+
+    /// Recompute the per-route tables from the lists.
+    pub fn rebuild(&mut self) {
+        let n = self.inst.n;
+        for k in 0..self.m {
+            let start = n + k;
+            let (mut load, mut length, mut service, mut size) = (0.0, 0.0, 0.0, 0);
+            let mut x = start;
+            loop {
+                let y = self.succ[x] as usize;
+                length += self.d(x, y);
+                if y == start {
+                    break;
+                }
+                load += self.inst.demand[y];
+                service += self.inst.service[y];
+                size += 1;
+                x = y;
+            }
+            (self.load[k], self.length[k], self.service[k], self.size[k]) =
+                (load, length, service, size);
+        }
+    }
+
+    /// The customers of route k, in order.
+    pub fn customers(&self, k: usize) -> Vec<usize> {
+        let start = self.inst.n + k;
+        let mut out = Vec::with_capacity(self.size[k] as usize);
+        let mut x = self.succ[start] as usize;
+        while x != start {
+            out.push(x);
+            x = self.succ[x] as usize;
+        }
+        out
+    }
+
+    /// The non-empty routes, as lists of customers.
+    pub fn routes(&self) -> Vec<Vec<usize>> {
+        (0..self.m)
+            .map(|k| self.customers(k))
+            .filter(|r| !r.is_empty())
+            .collect()
+    }
+
+    #[inline]
+    pub fn load_excess(&self, load: f64) -> f64 {
+        (load - self.inst.capacity).max(0.0)
+    }
+
+    #[inline]
+    pub fn duration_excess(&self, length: f64, service: f64) -> f64 {
+        self.inst
+            .max_duration
+            .map_or(0.0, |m| (length + service - m).max(0.0))
     }
 
     /// Total distance, without penalties.
@@ -322,52 +430,303 @@ impl<'a> Routes<'a> {
     }
 
     pub fn excess_load(&self) -> f64 {
-        self.load
-            .iter()
-            .map(|&l| (l - self.inst.capacity).max(0.0))
-            .sum()
+        self.load.iter().map(|&l| self.load_excess(l)).sum()
     }
 
     pub fn excess_duration(&self) -> f64 {
-        self.inst.max_duration.map_or(0.0, |m| {
-            self.duration.iter().map(|&t| (t - m).max(0.0)).sum()
-        })
+        (0..self.m)
+            .map(|k| self.duration_excess(self.length[k], self.service[k]))
+            .sum()
     }
 
-    /// Every customer exactly once, no constraint violated.
+    /// No constraint violated (every customer is on exactly one route by
+    /// construction).
     pub fn is_feasible(&self) -> bool {
-        let mut seen = vec![0u32; self.inst.n];
-        self.routes.iter().flatten().for_each(|&c| seen[c] += 1);
-        seen[0] == 0
-            && seen[1..].iter().all(|&s| s == 1)
-            && self.excess_load() == 0.0
-            && self.excess_duration() <= 1e-9
+        self.excess_load() <= 1e-9 && self.excess_duration() <= 1e-9
+    }
+
+    /// Remove customer c from its route (reconnecting its neighbours).
+    fn unlink(&mut self, c: usize) {
+        let (p, s) = (self.pred[c] as usize, self.succ[c] as usize);
+        self.link(p, s);
+    }
+
+    /// Insert customer c after node a (a customer or a route's sentinel).
+    fn insert_after(&mut self, c: usize, a: usize) {
+        let b = self.succ[a] as usize;
+        self.link(a, c);
+        self.link(c, b);
+        self.route[c] = self.route[a];
+    }
+
+    /// Best position for customer c (not on any route) in route k, by distance:
+    /// (node to insert after, added distance).
+    pub fn best_insertion(&self, c: usize, k: usize) -> (usize, f64) {
+        let start = self.inst.n + k;
+        let (mut best, mut cost) = (start, f64::INFINITY);
+        let mut a = start;
+        loop {
+            let b = self.succ[a] as usize;
+            let add = self.d(a, c) + self.d(c, b) - self.d(a, b);
+            if add < cost {
+                (best, cost) = (a, add);
+            }
+            if b == start {
+                break;
+            }
+            a = b;
+        }
+        (best, cost)
+    }
+
+    /// Take customer c off its route; route tables updated.
+    pub fn remove(&mut self, c: usize) {
+        let k = self.route[c] as usize;
+        let (p, s) = (self.pred[c] as usize, self.succ[c] as usize);
+        self.length[k] += self.d(p, s) - self.d(p, c) - self.d(c, s);
+        self.load[k] -= self.inst.demand[c];
+        self.service[k] -= self.inst.service[c];
+        self.size[k] -= 1;
+        self.unlink(c);
+        self.route[c] = u32::MAX;
+        self.succ[c] = c as u32;
+        self.pred[c] = c as u32;
+    }
+
+    /// Put customer c (off every route) after node a; route tables updated.
+    pub fn put(&mut self, c: usize, a: usize) {
+        let k = self.route[a] as usize;
+        let b = self.succ[a] as usize;
+        self.length[k] += self.d(a, c) + self.d(c, b) - self.d(a, b);
+        self.load[k] += self.inst.demand[c];
+        self.service[k] += self.inst.service[c];
+        self.size[k] += 1;
+        self.insert_after(c, a);
+    }
+
+    /// Intra-route refinement (the paper's every-200-iterations pass): each
+    /// customer of each route is removed and reinserted at its best position
+    /// in the same route, repeated while that shortens a route.
+    pub fn refine(&mut self) {
+        for k in 0..self.m {
+            loop {
+                let before = self.length[k];
+                for c in self.customers(k) {
+                    self.remove(c);
+                    let (a, _) = self.best_insertion(c, k);
+                    self.put(c, a);
+                }
+                if self.length[k] >= before - 1e-9 {
+                    break;
+                }
+            }
+        }
     }
 }
 
 impl Model for Routes<'_> {
     type Cost = f64;
-    /// Distance plus the penalised excess load and duration, from scratch.
+    /// f(s) = distance + α·excess load + β·excess duration, from the lists
+    /// alone (not the cached per-route tables).
     fn evaluate(&self) -> f64 {
-        let inst = self.inst;
+        let n = self.inst.n;
         let mut total = 0.0;
-        let (mut load_excess, mut duration_excess) = (0.0, 0.0);
-        for r in &self.routes {
-            let mut prev = 0;
+        let (mut q, mut t) = (0.0, 0.0);
+        for k in 0..self.m {
+            let start = n + k;
             let (mut load, mut length, mut service) = (0.0, 0.0, 0.0);
-            for &c in r {
-                load += inst.demand[c];
-                length += inst.d(prev, c);
-                service += inst.service[c];
-                prev = c;
+            let mut x = start;
+            loop {
+                let y = self.succ[x] as usize;
+                length += self.d(x, y);
+                if y == start {
+                    break;
+                }
+                load += self.inst.demand[y];
+                service += self.inst.service[y];
+                x = y;
             }
-            length += inst.d(prev, 0);
             total += length;
-            load_excess += (load - inst.capacity).max(0.0);
-            if let Some(m) = inst.max_duration {
-                duration_excess += (length + service - m).max(0.0);
+            q += self.load_excess(load);
+            t += self.duration_excess(length, service);
+        }
+        total + self.penalties.capacity * q + self.penalties.duration * t
+    }
+}
+
+/// Move customer c to route `to`, after node `after` (a customer of `to`, or
+/// its sentinel). The delta is O(1): three arcs and the two routes' load and
+/// duration penalties.
+#[derive(Clone, Copy, Debug)]
+pub struct Relocate {
+    pub c: usize,
+    pub to: usize,
+    pub after: usize,
+}
+
+impl<'a> Relocate {
+    /// The change of f(s), for a customer moving to another route.
+    #[inline]
+    pub fn delta_of(&self, s: &Routes<'a>) -> f64 {
+        let (c, a) = (self.c, self.after);
+        let from = s.route[c] as usize;
+        let (p, q) = (s.pred[c] as usize, s.succ[c] as usize);
+        let removed = s.d(p, q) - s.d(p, c) - s.d(c, q);
+        if from == self.to {
+            // same route: remove, then insert (a is not c)
+            let b = if s.succ[a] as usize == c {
+                q
+            } else {
+                s.succ[a] as usize
+            };
+            if a == p {
+                return 0.0;
+            }
+            let added = s.d(a, c) + s.d(c, b) - s.d(a, b);
+            let (len, srv) = (s.length[from], s.service[from]);
+            let pen = s.penalties.duration
+                * (s.duration_excess(len + removed + added, srv) - s.duration_excess(len, srv));
+            return removed + added + pen;
+        }
+        let b = s.succ[a] as usize;
+        let added = s.d(a, c) + s.d(c, b) - s.d(a, b);
+        let (dq, ds) = (s.inst.demand[c], s.inst.service[c]);
+        let (lf, lt) = (s.load[from], s.load[self.to]);
+        let load_pen =
+            s.load_excess(lf - dq) - s.load_excess(lf) + s.load_excess(lt + dq) - s.load_excess(lt);
+        let (nf, nt) = (s.length[from], s.length[self.to]);
+        let (sf, st) = (s.service[from], s.service[self.to]);
+        let dur_pen = s.duration_excess(nf + removed, sf - ds) - s.duration_excess(nf, sf)
+            + s.duration_excess(nt + added, st + ds)
+            - s.duration_excess(nt, st);
+        removed + added + s.penalties.capacity * load_pen + s.penalties.duration * dur_pen
+    }
+}
+
+impl<'a> Move<Routes<'a>> for Relocate {
+    fn apply(&self, s: &mut Routes<'a>) {
+        let from = s.route[self.c] as usize;
+        s.remove(self.c);
+        s.put(self.c, self.after);
+        s.last = Some((self.c, from, self.to));
+    }
+    #[inline]
+    fn delta(&self, s: &Evaluated<Routes<'a>>) -> Option<f64> {
+        Some(self.delta_of(s))
+    }
+}
+
+/// The paper's attribute rule: after customer c leaves route k, putting it
+/// back in route k is tabu (key c·m + route).
+impl<'a> TabuAttr<Routes<'a>> for Relocate {
+    type Key = usize;
+    #[inline]
+    fn key(&self, s: &Routes<'a>) -> usize {
+        self.c * s.m + self.to
+    }
+    #[inline]
+    fn reverse_key(&self, before: &Routes<'a>) -> usize {
+        self.c * before.m + before.route[self.c] as usize
+    }
+}
+impl<'a> DenseAttr<Routes<'a>> for Relocate {
+    fn key_count(s: &Routes<'a>) -> usize {
+        s.inst.n * s.m
+    }
+}
+
+/// Relocate each customer to the best position (by distance) of every other
+/// route; empty routes are all the same, so only the first is tried.
+pub struct InterRoute;
+
+impl<'a> Neighborhood<Routes<'a>> for InterRoute {
+    type Move = Relocate;
+    fn explore<V: Visitor<Relocate, f64>>(
+        &mut self,
+        s: &Evaluated<Routes<'a>>,
+        vis: &mut V,
+    ) -> std::ops::ControlFlow<()> {
+        let first_empty = (0..s.m).find(|&k| s.size[k] == 0);
+        for c in 1..s.inst.n {
+            let from = s.route[c] as usize;
+            for k in 0..s.m {
+                if k == from || (s.size[k] == 0 && Some(k) != first_empty) {
+                    continue;
+                }
+                let (after, _) = s.best_insertion(c, k);
+                let m = Relocate { c, to: k, after };
+                vis.visit(m, m.delta_of(s))?;
             }
         }
-        total + self.penalties.capacity * load_excess + self.penalties.duration * duration_excess
+        std::ops::ControlFlow::Continue(())
     }
+}
+
+/// The sweep start (the paper's initial solution): customers by angle
+/// around the depot, each inserted at its best position in the current
+/// route; a new route opens when capacity or duration would be exceeded
+/// while vehicles remain, so the first m − 1 routes are feasible.
+pub fn sweep<'a>(inst: &'a Instance, m: usize, rng: &mut impl mets::rand::Rng) -> Routes<'a> {
+    let n = inst.n;
+    let xy = inst.xy.as_ref().expect("the sweep needs coordinates");
+    let offset: f64 = rng.random::<f64>() * std::f64::consts::TAU;
+    let mut order: Vec<usize> = (1..n).collect();
+    let angle = |c: usize| {
+        let a = (xy[c].1 - xy[0].1).atan2(xy[c].0 - xy[0].0) - offset;
+        a.rem_euclid(std::f64::consts::TAU)
+    };
+    order.sort_by(|&a, &b| angle(a).partial_cmp(&angle(b)).expect("finite angles"));
+    let mut s = Routes::with_vehicles(inst, Vec::new(), m, Penalties::default());
+    let mut k = 0;
+    for c in order {
+        let (a, add) = s.best_insertion(c, k);
+        let over_q = s.load[k] + inst.demand[c] > inst.capacity + 1e-9;
+        let over_t = s.duration_excess(s.length[k] + add, s.service[k] + inst.service[c]) > 1e-9;
+        if (over_q || over_t) && k + 1 < m && s.size[k] > 0 {
+            k += 1;
+            let (a, _) = s.best_insertion(c, k);
+            s.put(c, a);
+        } else {
+            s.put(c, a);
+        }
+    }
+    s
+}
+
+/// The paper's perturbation (cluster removal, after Pisinger & Ropke): a
+/// random seed customer and its π closest customers are removed and
+/// reinserted one by one, in random order, at least distance over all
+/// routes (the first empty route included).
+pub fn cluster_perturbation(s: &mut Routes, pi: usize, rng: &mut impl mets::rand::Rng) {
+    let n = s.inst.n;
+    let seed = rng.random_range(1..n);
+    let mut by: Vec<usize> = (1..n).collect();
+    by.sort_by(|&a, &b| {
+        s.inst
+            .d(seed, a)
+            .partial_cmp(&s.inst.d(seed, b))
+            .expect("finite")
+    });
+    let mut cluster: Vec<usize> = by.into_iter().take(pi + 1).collect();
+    for &c in &cluster {
+        s.remove(c);
+    }
+    for i in (1..cluster.len()).rev() {
+        cluster.swap(i, rng.random_range(0..=i));
+    }
+    for c in cluster {
+        let first_empty = (0..s.m).find(|&k| s.size[k] == 0);
+        let (k, a) = (0..s.m)
+            .filter(|&k| s.size[k] > 0 || Some(k) == first_empty)
+            .map(|k| {
+                let (a, add) = s.best_insertion(c, k);
+                (add, k, a)
+            })
+            .min_by(|x, y| x.0.partial_cmp(&y.0).expect("finite"))
+            .map(|(_, k, a)| (k, a))
+            .expect("a route");
+        let _ = k;
+        s.put(c, a);
+    }
+    s.last = None;
 }
