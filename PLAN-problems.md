@@ -151,19 +151,47 @@ on for 30 minutes: on tai50a the whole question is leaving that one
 optimum, and independent long trajectories do it in a median of 6
 minutes, 5 of 5.
 
+*Second stage (build 5fafddd, same setup, 30 minutes, 5 seeds;
+`reports/2026-11-06-q6-tai50a-arms.md`; all 30 tai50a `.best` files
+recounted).*
+
+| arm | aspiration | reached | time to best known by seed (s) | median, max |
+|---|---|---|---|---|
+| B, independent | 20n² | 5/5 | 12, 35, 25, 266, 1,027 | 35 s, 1,027 s |
+| C, independent + perturbation of stalled members | 10n² | 5/5 | 71, 353, 402, 438, 185 | 353 s, 438 s |
+| A, memetic (crossover, one-to-one) | 10n² | 4/5 | 291, 456, —, 384, 290 | 337 s, 456 s |
+
+Reading. (1) The aspiration age is the strongest knob found so far on
+tai-a: 20n² puts the median best at 5 minutes at the best known, and
+three seeds tie in under 40 s. The long-term aspiration is a forced
+diversification (put back an assignment unseen for the age); with 112
+independent trajectories the population already diversifies, so forcing
+less of it helps. If that explanation is right, the aspiration can go
+much higher, or off, without loss, which is the next level. (2) A at
+10n² is the only arm that lost a seed to the 4,941,410 attractor; among
+the seeds that reached, its times are B's and C's. By the stated rule the
+hypothesis holds at n = 50: B and C go on, A does not. (3) B and C at
+10n² are not separable with five seeds (C's max 438 s against B's 1,549 s
+is one seed).
+
 Decisions:
-* Aspiration 10n² for every tai-a arm from here (`EXTRA="--aspiration
-  10"`); the GPU default stays Taillard's 5n² until a second instance
-  agrees (§0 rule).
-* The best level was the edge of the sweep, so one more level: B at 20n²
-  on tai50a, 5 seeds, same 30-minute budget (`ASPIRATIONS=20 SWEEP=1`).
-  If 20n² also reaches 5/5 with a lower median than 10n², extend once
-  more; if its reach count drops, 10n² is settled.
-* The five B-asp10 runs are arm B on tai50a: run only `ARMS="A C"` there
-  (10 GPU-hours). The question tai50a then answers is A against B: if the
-  population at 10n² does not reach 5/5 with a median under 355 s, the
-  Q6 hypothesis holds at n = 50 and B/C go on to tai60a and tai80a; if A
-  matches B, both go on and tai80a decides.
+* Aspiration 20n² for every tai-a arm from here; the GPU default stays
+  Taillard's 5n² until a second instance agrees (§0 rule).
+* Next level on tai50a, arm B, same budget: 40n² and effectively off
+  (`ASPIRATIONS="40 1000"`: 1000n² is 2.5·10⁹ iterations, beyond a
+  30-minute run). If off is as good as 20n², the aspiration is redundant
+  with the population on tai-a and the arms on tai60a/tai80a run at off;
+  if off loses seeds, the sweep has found its optimum between 20n² and
+  40n² and the arms run at the better of the two.
+* tai60a: B and C at the settled aspiration, 5 seeds, 30 minutes; a reach
+  count under 3/5 for both repeats at 60 minutes before any conclusion.
+  tai80a: 60 minutes from the start. Arm A is not run on either.
+* One cheap check for the §0 default rule after tai60a: B at 20n² on
+  sko100a, 5 seeds, 10 minutes, against the 21.6 s memetic tie. It says
+  whether independence also wins where crossover was believed to help,
+  which decides the `qap_gpu` default and bears on Q5.
+* (Done, see the second stage above.) The 20n² level and arms A, C ran
+  at 10n² on tai50a; A reached 4/5, so B and C go on.
 * Each tie is checked with `scripts/verify_qap.py` before it is counted;
   the report carries the recounts, not only the summary table.
 
@@ -283,6 +311,31 @@ Decisions:
   signal that the population is at HEAD's level; two misses at 1–2
   conflicts would say the limit is the method (HEAD's tie-breaking,
   iteration budget per child) and not the hardware, and A4/A5 wait.
+
+*A2 preparation done (`reports/2026-11-06-a2-preparation.md`).* Host loop
+clean on both graphs at k = 82 and 81; shared tables would need 163 KB,
+so the kernel takes its global-memory path, which has never run on the
+GPU and was 9× slower per batch on DSJC500.5. Directions:
+1. k values: my own recollection agrees with 82 (DSJC1000.5) and 81
+   (flat1000_76_0), both from Titiloye & Crispin's quantum annealing and
+   matched by HEAD; the owner confirms them from the HEAD paper's table
+   before the run, as the rule says.
+2. First GPU run is a 10-minute smoke test on DSJC1000.5 at 82: the
+   start line (global tables, occupancy, device memory ≈ 109 MB),
+   `mismatches=0` on every batch, and the batch time. Only then the two
+   4-hour runs. If the rate is near the 1.2 M it/s of the first
+   DSJC500.5 kernel, 4 hours is a few hundred generations and the runs
+   are a floor, not a verdict.
+3. **A2.6, kernel: 8-bit conflict table when 16-bit tables overflow
+   shared memory.** γ[v][c] counts v's neighbours of colour c; on these
+   graphs it is around 6 and never near 255 in a near-legal colouring.
+   An 8-bit table is n·k = 82 KB, and with the 8-bit colouring and the
+   conflict list it fits the 99 KB opt-in at one block per SM. Saturate
+   at 255 and set a per-block overflow flag that the host reads with the
+   batch (the recount already catches any wrong cost). Measure global
+   against 8-bit shared on DSJC1000.5 at 82 (batch time, it/s) before
+   the 4-hour runs if the smoke test shows the global path under 3 M
+   it/s. This is the same move that took DSJC500.5 from 1.2 to 4.1 M.
 
 ### A4. 16-bit colours
 
@@ -619,10 +672,11 @@ is reported as "exploratory" and does not change a default.
 
 ## 7. Order of work
 
-GPU queue (one run at a time on the RTX 3060): Q6 tai50a, B at 20n² and
-arms A, C at 10n² (running) → A2 calibration, DSJC1000.5 and
-flat1000_76_0 at k = best known, 4 h each → Q7 tai256c, cohesive, 4 h →
-Q6 tai60a/tai80a with the arms that tied tai50a → Q5.
+GPU queue (one run at a time on the RTX 3060): Q6 tai50a, B at 40n² and
+off (5 h) → A2 smoke test on DSJC1000.5 (10 min), then the 8-bit table
+comparison if needed → Q6 tai60a, B and C (5 h), then the sko100a check
+(1 h) → A2 calibration runs, 4 h each → Q7 tai256c, cohesive, 4 h → Q6
+tai80a, B and C at 60 minutes (10 h) → Q5.
 
 Sandbox queue while the GPU runs, in order:
 1. Q9: finish the tai50a run (5 seeds per arm, single-threaded), verify
