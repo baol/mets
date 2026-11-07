@@ -24,3 +24,4 @@ on the owner's machine (RTX 3060) are recorded here as they were shared.
 | [2026-11-06-a2-smoke-test.md](2026-11-06-a2-smoke-test.md) | A2 smoke test on the RTX 3060: DSJC1000.5 with global tables, clean, 1.2 M it/s; 8-bit table next |
 | [2026-11-07-p7-golden-rebased.md](2026-11-07-p7-golden-rebased.md) | P7: Golden rebased onto one reference (the paper's best knowns moved 0.20%): the real deficit is 0.32 points at 10⁵, concentrated in Golden 3, 4, 18, 9 |
 | [2026-11-07-p7-reference-fleet-phase-log.md](2026-11-07-p7-reference-fleet-phase-log.md) | P7: Golden 7/8 at the reference fleet: β pinned at its clamp in every phase, 0 feasible iterations; the fleet is tight (feasibility needs ≤ 3% gap) |
+| [2026-11-07-p7-fleet-and-p.md](2026-11-07-p7-fleet-and-p.md) | P7: GENI without the spare vehicle on 11 Golden instances (2.48% against 1.76% with it; 1.41% against 1.65% without Golden 18, which ends at 13.14%); Golden 7/8 plain at 10⁶ with a tight fleet |
