@@ -21,6 +21,7 @@
 //!   cvrp FILE.vrp [FILE.sol] [--eta N] [--seed S] [--vehicles M | --no-spare] [--max-seconds T]
 //!        [--insertion best|geni] [--removal reconnect|unstring] [--geni-p P]
 //!        (defaults best, reconnect; P = 5 for both GENI insertion and unstringing)
+//!        [--phase-log]  one line per phase: feasibility, excesses, α, β
 //!       solve; the best feasible solution is saved as NAME.sol (CVRPLIB format,
 //!       or the first free NAME.2.sol, …); a .sol gives the gap to its cost and,
 //!       by default, the fleet size (its routes, plus one spare vehicle)
@@ -58,6 +59,12 @@ struct Memory {
     /// Best feasible solution (distance, routes), and when it last improved.
     best: (f64, Vec<Vec<usize>>),
     last_improvement: u64,
+    /// This phase's diagnostics (`--phase-log`): feasible iterations, the
+    /// smallest load and duration excess seen, and the largest β.
+    feasible_its: u64,
+    min_load: f64,
+    min_duration: f64,
+    max_beta: f64,
 }
 
 /// Aspiration by attribute: a tabu move is allowed if f(s′) is below the
@@ -81,6 +88,7 @@ fn its(
     reference: Option<f64>,
     geni_p: usize,
     unstring_p: usize,
+    phase_log: bool,
 ) -> (f64, Vec<Vec<usize>>) {
     let n = inst.n;
     let t0 = Instant::now();
@@ -98,6 +106,10 @@ fn its(
             (f64::INFINITY, Vec::new())
         },
         last_improvement: 0,
+        feasible_its: 0,
+        min_load: f64::INFINITY,
+        min_duration: f64::INFINITY,
+        max_beta: 0.0,
     }));
     let tau_max = ((n * m) as f64).sqrt().ceil() as u64;
     let pi_max = (n as f64).sqrt().ceil() as usize;
@@ -115,6 +127,8 @@ fn its(
             mm.zeta = rng.random();
             mm.delta = rng.random();
             mm.last_improvement = lambda;
+            (mm.feasible_its, mm.min_load, mm.min_duration, mm.max_beta) =
+                (0, f64::INFINITY, f64::INFINITY, 0.0);
         }
         // the tabu phase
         let mut st = State::new(s.clone(), rng.random());
@@ -155,6 +169,11 @@ fn its(
                 }
             };
             record(&mut mm, cur);
+            let (xl, xd) = (cur.excess_load(), cur.excess_duration());
+            mm.feasible_its += (xl <= 1e-9 && xd <= 1e-9) as u64;
+            mm.min_load = mm.min_load.min(xl);
+            mm.min_duration = mm.min_duration.min(xd);
+            mm.max_beta = mm.max_beta.max(cur.penalties.duration);
             // self-adjusting penalty weights, then the cached cost follows
             let (q, t) = (cur.excess_load() > 1e-9, cur.excess_duration() > 1e-9);
             let up = 1.0 + mm.delta;
@@ -195,6 +214,24 @@ fn its(
         } else {
             Routes::with_vehicles(inst, best.1, m, st.current().penalties)
         };
+        if phase_log {
+            let mm = mem.borrow();
+            let e = st.current();
+            println!(
+                "phase={phase} lambda={} mu={mu} pi={pi} feasible_its={} min_excess_load={:.3} min_excess_duration={:.3} end_excess_load={:.3} end_excess_duration={:.3} alpha={:.4e} beta={:.4e} max_beta={:.4e} distance={:.2} best={:.2} kept={keep}",
+                mm.lambda,
+                mm.feasible_its,
+                mm.min_load,
+                mm.min_duration,
+                e.excess_load(),
+                e.excess_duration(),
+                e.penalties.capacity,
+                e.penalties.duration,
+                mm.max_beta,
+                e.distance(),
+                best.0,
+            );
+        }
         pi = rng.random_range(0..=pi_max);
         cluster_perturbation(&mut s, pi, &mut rng);
         if phase.is_multiple_of(50) {
@@ -229,6 +266,7 @@ fn main() {
     let max_seconds: f64 = args.value("--max-seconds").unwrap_or(f64::INFINITY);
     let vehicles: Option<usize> = args.value("--vehicles");
     let p: usize = args.value("--geni-p").unwrap_or(5);
+    let phase_log = args.flag("--phase-log");
     let geni_p = match args.value::<String>("--insertion").as_deref() {
         None | Some("best") => 0,
         Some("geni") => p,
@@ -285,6 +323,7 @@ fn main() {
         ref_cost,
         geni_p,
         unstring_p,
+        phase_log,
     );
     let secs = t0.elapsed().as_secs_f64();
     if routes.is_empty() {
