@@ -984,6 +984,18 @@ impl<'a> Neighborhood<Routes<'a>> for InterRoute {
 /// route; a new route opens when capacity or duration would be exceeded
 /// while vehicles remain, so the first m − 1 routes are feasible.
 pub fn sweep<'a>(inst: &'a Instance, m: usize, rng: &mut impl mets::rand::Rng) -> Routes<'a> {
+    sweep_with(inst, m, 0, rng)
+}
+
+/// `sweep`, inserting into the current route by GENI with neighbourhoods
+/// of size `geni_p` when it is > 0 (the paper inserts by GENI on problems
+/// without time windows); the route-opening rule is the same.
+pub fn sweep_with<'a>(
+    inst: &'a Instance,
+    m: usize,
+    geni_p: usize,
+    rng: &mut impl mets::rand::Rng,
+) -> Routes<'a> {
     let n = inst.n;
     let xy = inst.xy.as_ref().expect("the sweep needs coordinates");
     let offset: f64 = rng.random::<f64>() * std::f64::consts::TAU;
@@ -995,17 +1007,34 @@ pub fn sweep<'a>(inst: &'a Instance, m: usize, rng: &mut impl mets::rand::Rng) -
     order.sort_by(|&a, &b| angle(a).partial_cmp(&angle(b)).expect("finite angles"));
     let mut s = Routes::with_vehicles(inst, Vec::new(), m, Penalties::default());
     let mut k = 0;
+    // the best insertion of c into route k: plain, or GENI
+    let insert = |s: &mut Routes<'a>, c: usize, k: usize, apply: bool| -> f64 {
+        if geni_p == 0 {
+            let (a, add) = s.best_insertion(c, k);
+            if apply {
+                s.put(c, a);
+            }
+            return add;
+        }
+        let tour = s.tour(k);
+        let g = geni::best(&tour, c, geni_p, &|a, b| s.d(a, b));
+        if apply {
+            if g.kind == 0 {
+                s.put(c, tour[g.i as usize]);
+            } else {
+                s.put_geni(c, k, &g);
+            }
+        }
+        g.added
+    };
     for c in order {
-        let (a, add) = s.best_insertion(c, k);
+        let add = insert(&mut s, c, k, false);
         let over_q = s.load[k] + inst.demand[c] > inst.capacity + 1e-9;
         let over_t = s.duration_excess(s.length[k] + add, s.service[k] + inst.service[c]) > 1e-9;
         if (over_q || over_t) && k + 1 < m && s.size[k] > 0 {
             k += 1;
-            let (a, _) = s.best_insertion(c, k);
-            s.put(c, a);
-        } else {
-            s.put(c, a);
         }
+        insert(&mut s, c, k, true);
     }
     s
 }

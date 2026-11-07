@@ -101,7 +101,7 @@ fn its(
     let n = inst.n;
     let t0 = Instant::now();
     let mut rng = DefaultRng::seed_from_u64(seed);
-    let mut s = sweep(inst, m, &mut rng);
+    let mut s = sweep_with(inst, m, geni_p, &mut rng); // the paper inserts by GENI here too
     let mem = Rc::new(RefCell::new(Memory {
         best_with: vec![f64::INFINITY; n * m],
         freq: vec![0; n * m],
@@ -829,6 +829,35 @@ mod tests {
                 );
                 assert!((fresh.load[k] - s.load[k]).abs() < 1e-9);
                 assert_eq!(fresh.size[k], s.size[k]);
+            }
+        }
+    }
+
+    /// Diagnostic, needs vrp/ (scripts/fetch_vrp_sets.sh): the routes the
+    /// sweep opens with an unbounded fleet, plain and GENI insertion.
+    #[test]
+    #[ignore]
+    fn sweep_route_counts_on_golden() {
+        for (name, m) in [
+            ("Golden_2", 11),
+            ("Golden_3", 11),
+            ("Golden_4", 11),
+            ("Golden_7", 9),
+            ("Golden_8", 11),
+        ] {
+            let inst = Instance::read(
+                std::path::Path::new(&format!("vrp/Golden/{name}.vrp")),
+                None,
+            )
+            .unwrap();
+            for p in [0, 5] {
+                let mut used = Vec::new();
+                for seed in 0..5 {
+                    let mut rng = DefaultRng::seed_from_u64(seed);
+                    let s = sweep_with(&inst, 40, p, &mut rng);
+                    used.push((0..s.m).filter(|&k| s.size[k] > 0).count());
+                }
+                println!("{name} (m = {m}) p = {p}: free-fleet sweep routes {used:?}");
             }
         }
     }
