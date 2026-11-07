@@ -892,6 +892,33 @@ is reported as "exploratory" and does not change a default.
 
 ## 7. Order of work
 
+### Assignments (sync point for everyone working on `records`)
+
+Two researchers work on this branch at once: the **external researcher**
+(an opus session the owner runs, with the GPU data and the QAPLIB files)
+and the **in-session subagent** (an opus agent the head of research runs
+inside the sandbox, with the CMT/Golden data). Both commit to `records`
+under the ground rules, with `git pull --rebase origin records` before
+every push. To avoid two hands on one file:
+
+| who | holds, until the item's report is on the branch | files it may edit |
+|---|---|---|
+| in-session subagent | P7 fleet measurement (GENI without the spare, Golden 1–6, 9–12, 18; Golden 7/8 at 10⁶); GENI p = 7/10 on Golden 3 and 4; `FLEET=paper` in the runner and the paper-reference column in the summary | `scripts/p7-cvrp.sh`, `scripts/p7-summary.py`, `scripts/paper_table9.py` (new), `reports/2026-11-07-p7-fleet-and-p.md`, `reports/README.md` (its own row) |
+| external researcher | P7 unstringing measurement and the next GENI suspects (refinement with GENI, reinsertion with GENI); Q6/A2/Q10 reports from the owner's run data; the Q7 tai256c and Q6 tai60a GPU runs' reports; `--table auto` thread default (done) | `examples/cvrp.rs`, `examples/common/vrp.rs`, `examples/common/geni.rs`, `examples/coloring_gpu.rs`, `examples/qap_gpu.rs`, `examples/qap_advanced.rs`, `scripts/q6-*`, `scripts/q10-*`, `scripts/verify_*.py`, their reports, `reports/README.md` (its own rows) |
+| head of research | decisions, `PLAN-problems.md`, `DESIGN.md` entries that record decisions | `PLAN-problems.md`, `DESIGN.md`, `QAPLIB.md`, `README.md` |
+
+Rules: an item not in the table is unassigned; a researcher claims it by
+adding a row here in a one-line commit before starting, and the head of
+research resolves clashes. Reports are never edited by the other
+researcher; corrections go in a new dated report or in the plan. Run
+directories under `results/` are local to each machine and never
+committed; a report carries every number a reader needs. Items planned
+for the external researcher next, once the unstringing report is in: the
+P7 Golden acceptance at the paper's fleet with 10 seeds (after the head
+of research's decision on p and GENI), then the parallel scheme (P7
+step 8) and its curve on CMT5 and Golden 20. Items planned for the
+subagent next: none beyond its table row; it ends when its report is in.
+
 GPU queue (one run at a time on the RTX 3060): A2 calibration runs,
 DSJC1000.5 at 82 and flat1000_76_0 at 81, `--table 8 --threads 1024`,
 4 h each, and Q6 tai60a, B and C at 20n² (5 h), in whichever order the
