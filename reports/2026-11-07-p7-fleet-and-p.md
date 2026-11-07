@@ -74,3 +74,54 @@ Build `71f6bb7`, `--no-spare` with plain (best) insertion, seed 1,
 Recount: Golden 8's `.sol` OK (11771.0749 recomputed, 11771.07 stated);
 Golden 7 saved none. The paper's m is two vehicles more than these on both
 instances, so this is a tight fleet, not a discrepancy.
+
+## 3. GENI's neighbourhood size p on Golden 3 and 4 (cut short)
+
+Default fleet (reference + 1 = 11 = the paper's m on both), `--insertion
+geni --geni-p P`, seed 1, η = 10⁵. Command, per run:
+
+```
+SET=Golden INSTANCES=Golden_3 SEEDS=1 ETA=100000 TAG=Golden-geni-p7 EXTRA="--insertion geni --geni-p 7" VRP=<vrpdata> JOBS=1 scripts/p7-cvrp.sh
+```
+
+(TAG and P changed per run: Golden-geni-p7 / p = 7, Golden-geni-p10 / p = 10.)
+The p = 5 column is `2026-11-06-p7-geni-golden.md` (build `709ed58`),
+routes from `2026-11-07-p7-extra-route.md`; the paper column is Table 9's
+ITS/1 10⁵ average rebased onto today's best known
+(`2026-11-07-p7-golden-rebased.md`).
+
+| Golden | p = 5 % (routes, s) | p = 7 % (routes, s) | p = 10 | paper, rebased % |
+|---|---|---|---|---|
+| 3 | 2.57 (11, 1,035) | **3.14** (11, 3,518) | cancelled | 0.59 |
+| 4 | 2.56 (11, 1,272) | cancelled | cancelled | 0.79 |
+
+Golden 3 at p = 7: build `814d5a2`, best 11343.34 with 11 routes; recount
+OK (11343.3387 recomputed); 2.78% to the paper's 2011 reference. The run
+took 3.4× the p = 5 time, not the 2× expected; its trajectory was 3.42% at
+λ ≈ 44,000, 3.28% at 79,000, 3.14% at 96,000.
+
+**The sweep was stopped at 10:08 by the head of research's decision**,
+after the p = 7 result on Golden 3 and the extra-route finding
+(`2026-11-07-p7-extra-route.md`: Golden 3 and 4 keep 11 routes in every
+run). Three runs were killed and have no result: Golden 4 at p = 7 (build
+`1218892`, killed after about 45 min; its only log line, 2.95% at
+λ ≈ 49,000 and 2,126 s, is an intermediate value, not a result), and
+Golden 3 and Golden 4 at p = 10 (build `1218892`, killed after about 47
+and 51 min, before their first log line at phase 50). Their run
+directories are marked `CANCELLED` in place of `result.txt`. Between
+`814d5a2` and `1218892` the solver gained only `--phase-log`, off by
+default (diagnostics, no random draws).
+
+## What this says
+
+* **p.** On Golden 3, p = 7 did not narrow the gap: 3.14% against 2.57% at
+  p = 5, 0.57 points worse (just above the 0.5-point noise band of one
+  seed), with 11 routes in both. On Golden 4 there is no p result. Nothing
+  here shows a material improvement from a larger p.
+* **The smaller fleet, per instance (one seed each).** Without the spare
+  vehicle the gap fell by more than 0.5 points on Golden 3 (−1.37), 4
+  (−0.66), 6 (−1.47) and 9 (−0.92); it rose by more than 0.5 points on
+  Golden 11 (+0.79), 12 (+1.04) and 18 (+10.29); it moved by less than 0.5
+  on Golden 1, 2, 5 and 10. On the length-limited Golden 1–6 it helped on
+  the whole (0.99% against 1.54%); on 9–12 and 18 it hurt (Golden 18 most,
+  still converging at the end of the budget).
