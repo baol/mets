@@ -830,6 +830,39 @@ Decisions:
      knob whose sign depends on which constraint binds, which rules it
      out as a default. The p = 7 run on Golden 3 is in progress. No
      decision until both reports are on the branch.
+   * *Decisions 2026-11-07, midday* (`reports/2026-11-07-p7-fleet-and-p.md`
+     parts 1–2, `reports/2026-11-07-p7-unstringing.md`, all recounted):
+     1. **Fleet: not a default.** Without the spare, GENI improves the
+        length-limited Golden 1–6 by 0.55 points on average and worsens
+        the capacity-tight 9–12 by 0.22, with Golden 18 at 13.14% (still
+        falling steeply at the budget's end, most of the run infeasible).
+        `--no-spare` stays a flag; the default and the acceptance use the
+        paper's m (`FLEET=paper`).
+     2. **Unstringing: no gain** (1.87% against 1.75% on Golden 1–4,
+        9–12; Golden 2 +2.2 points on one seed, the rest within noise;
+        +10% time). Stays a flag, off. Golden 3 and 4 stay at 2.3–2.4%
+        against the paper's 0.6–0.8%.
+     3. **New hypothesis: the extra route.** With the spare, the runs end
+        with all m routes in use (the unstringing report: Golden 2 ends
+        with 11 routes, as GENI alone did; every no-spare run uses all
+        its vehicles). The paper gave its algorithm the same slack fleet
+        (Table 9's m, K + 1 or K + 2 on CMT against the standard K) and
+        reached gaps that imply the reference's route count. On Golden 3
+        the best known has 10 routes of about 1,100 under a 1,200 limit;
+        an eleventh route adds two depot legs, of the order of the 1.4
+        points that disappear when the fleet is 10. So the deficit on
+        Golden 2–4 may be one route the search never empties. Test at
+        zero cost first: count the routes in every saved with-spare best
+        solution (the plain and GENI runs of
+        `2026-11-06-p7-its-first-results.md` and `-geni-golden.md`, in
+        the external researcher's `results/p7/`) against the reference's
+        count, per instance; then, if confirmed, add the routes in use
+        to `--phase-log` and watch when the eleventh route fills and
+        whether it ever empties on Golden 3 at m = 11. If the count is
+        the deficit, the suspect is the mechanism that empties a route
+        (relocating a short route's last customers under the penalty
+        oscillation), ahead of `--refine geni` and `--reinsert geni`,
+        which then wait.
 3. The parallel scheme (step 8) follows Golden. The paper's scaling curve
    (Fig. 2) is on pr05, a *periodic* VRP instance the port does not read;
    measure the curve on CMT5 and Golden 20 instead, at 125,000 iterations
@@ -918,8 +951,8 @@ every push. To avoid two hands on one file:
 
 | who | holds, until the item's report is on the branch | files it may edit |
 |---|---|---|
-| in-session subagent | P7 fleet measurement (GENI without the spare, Golden 1–6, 9–12, 18; Golden 7/8 at 10⁶); GENI p = 7/10 on Golden 3 and 4; `FLEET=paper` in the runner and the paper-reference column in the summary | `scripts/p7-cvrp.sh`, `scripts/p7-summary.py`, `scripts/paper_table9.py` (new), `reports/2026-11-07-p7-fleet-and-p.md`, `reports/README.md` (its own row) |
-| external researcher | P7 unstringing measurement (result pending) and the next GENI suspects, implemented as `--refine geni` and `--reinsert geni` (measure each alone on Golden 1–4 and 9–12, one seed, 10⁵, default fleet); the Golden 7/8 phase log (done); Q6/A2/Q10 reports from the owner's run data; the Q7 tai256c and Q6 tai60a GPU runs' reports; `--table auto` thread default (done) | `examples/cvrp.rs`, `examples/common/vrp.rs`, `examples/common/geni.rs`, `examples/coloring_gpu.rs`, `examples/qap_gpu.rs`, `examples/qap_advanced.rs`, `scripts/q6-*`, `scripts/q10-*`, `scripts/verify_*.py`, their reports, `reports/README.md` (its own rows) |
+| in-session subagent | P7 fleet measurement (done, reported); GENI p = 7/10 on Golden 3 and 4 (running, part 3 of its report); `FLEET=paper` in the runner and the paper-reference column in the summary | `scripts/p7-cvrp.sh`, `scripts/p7-summary.py`, `scripts/paper_table9.py` (new), `reports/2026-11-07-p7-fleet-and-p.md`, `reports/README.md` (its own row) |
+| external researcher | P7, in this order: (1) the route-count check on the saved with-spare solutions (zero cost; report routes used vs reference per instance), (2) if confirmed, routes in use in `--phase-log` and the Golden 3 watch at m = 11, (3) only then `--refine geni` and `--reinsert geni` measured alone on Golden 1–4 and 9–12; unstringing (done, no gain); the Golden 7/8 phase log (done); Q6/A2/Q10 reports from the owner's run data; the Q7 tai256c and Q6 tai60a GPU runs' reports | `examples/cvrp.rs`, `examples/common/vrp.rs`, `examples/common/geni.rs`, `examples/coloring_gpu.rs`, `examples/qap_gpu.rs`, `examples/qap_advanced.rs`, `scripts/q6-*`, `scripts/q10-*`, `scripts/verify_*.py`, their reports, `reports/README.md` (its own rows) |
 | head of research | decisions, `PLAN-problems.md`, `DESIGN.md` entries that record decisions | `PLAN-problems.md`, `DESIGN.md`, `QAPLIB.md`, `README.md` |
 
 Rules: an item not in the table is unassigned; a researcher claims it by
