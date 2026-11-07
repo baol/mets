@@ -779,6 +779,33 @@ Decisions:
    measured alone on Golden 1–4 and 9–12 before the next; no better than
    plain, GENI stays a flag and the port is accepted on CMT only, which
    the DESIGN entry says.
+
+   *GENI result (`reports/2026-11-06-p7-geni-golden.md`):* 1.82%, between
+   the thresholds; unstringing implemented and running. *Rebased
+   (`reports/2026-11-07-p7-golden-rebased.md`):* the paper's Golden
+   references are 0.20% above today's best knowns on average, so on a
+   common footing the paper's 10⁵ mean is 1.50% and the deficit is 0.32
+   points, carried by Golden 3, 4, 18 and 9; ours is at or below the
+   paper on 8 of 20. Revised decisions:
+   * The Golden pass mark is **1.50% against today's best known** (the
+     paper's 1.30% rebased), and the summary reports both gaps.
+   * The fleet moves ahead of the remaining GENI suspects. The paper runs
+     with the reference fleet and no spare ("the first m − 1 routes are
+     feasible" at the start), and the plain-insertion diagnostic without
+     the spare gained most exactly on Golden 2–4. Measure GENI without
+     the spare on Golden 1–6, 9–12 and 18 (one seed, 10⁵). Then find out
+     why Golden 7 and 8 reach no feasible solution with the reference
+     fleet in 10⁵ iterations: log β (the duration weight) and the total
+     duration violation per phase; the paper's algorithm has the same
+     start and must get there, so a weight that never grows enough, a
+     refinement that undoes feasibility, or a perturbation that reinserts
+     without the duration term is the kind of thing to look for. If the
+     fleet closes Golden 3 and 4, the spare goes and `--no-spare` becomes
+     the default; the acceptance then needs feasibility on every run,
+     which the summary must check (it recounts, so it does).
+   * Unstringing's measurement completes as started; the refinement and
+     reinsertion suspects follow only if the fleet does not close the
+     gap.
 3. The parallel scheme (step 8) follows Golden. The paper's scaling curve
    (Fig. 2) is on pr05, a *periodic* VRP instance the port does not read;
    measure the curve on CMT5 and Golden 20 instead, at 125,000 iterations

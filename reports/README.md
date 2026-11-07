@@ -22,3 +22,4 @@ on the owner's machine (RTX 3060) are recorded here as they were shared.
 | [2026-11-06-p7-steps-1-7.md](2026-11-06-p7-steps-1-7.md) | P7 steps 1 and 7: `.vrp` reader, `Routes` model, `verify_vrp.py`; all 212 received solutions recount in both |
 | [2026-11-06-p7-its-first-results.md](2026-11-06-p7-its-first-results.md) | P7: sequential ITS, η = 10⁵, one seed: CMT mean gap 0.57% (paper 0.60%), Golden 2.65% (paper 1.30%) |
 | [2026-11-06-a2-smoke-test.md](2026-11-06-a2-smoke-test.md) | A2 smoke test on the RTX 3060: DSJC1000.5 with global tables, clean, 1.2 M it/s; 8-bit table next |
+| [2026-11-07-p7-golden-rebased.md](2026-11-07-p7-golden-rebased.md) | P7: Golden rebased onto one reference (the paper's best knowns moved 0.20%): the real deficit is 0.32 points at 10⁵, concentrated in Golden 3, 4, 18, 9 |
