@@ -815,6 +815,21 @@ Decisions:
      in the pages read; try 7 and 10 on Golden 3 and 4, one seed each),
      then unstringing (running), then GENI with q doubled in the route
      refinement, then GENI in the cluster reinsertion.
+   * *Status 2026-11-07, late morning.* The external researcher's phase
+     log (`reports/2026-11-07-p7-reference-fleet-phase-log.md`) confirms
+     the fleet reading from inside the run: at the reference fleet β sits
+     at its clamp from the first phase, no iteration is feasible, and the
+     search is a pure excess minimiser until feasibility, which needs a
+     total length within 3% of the best known. Not a bug; the clamp
+     (10⁹, ours, the paper has none) changes nothing. `--refine geni`
+     and `--reinsert geni` are implemented (1f71ec1), unmeasured; the
+     unstringing measurement is still to be reported. The subagent's
+     fleet runs are complete (11 instances) and its report with recounts
+     is pending; preview: the smaller fleet helps on the length-limited
+     Golden 1–6 and hurts on the capacity-tight 10–12 and 18, so it is a
+     knob whose sign depends on which constraint binds, which rules it
+     out as a default. The p = 7 run on Golden 3 is in progress. No
+     decision until both reports are on the branch.
 3. The parallel scheme (step 8) follows Golden. The paper's scaling curve
    (Fig. 2) is on pr05, a *periodic* VRP instance the port does not read;
    measure the curve on CMT5 and Golden 20 instead, at 125,000 iterations
@@ -904,7 +919,7 @@ every push. To avoid two hands on one file:
 | who | holds, until the item's report is on the branch | files it may edit |
 |---|---|---|
 | in-session subagent | P7 fleet measurement (GENI without the spare, Golden 1–6, 9–12, 18; Golden 7/8 at 10⁶); GENI p = 7/10 on Golden 3 and 4; `FLEET=paper` in the runner and the paper-reference column in the summary | `scripts/p7-cvrp.sh`, `scripts/p7-summary.py`, `scripts/paper_table9.py` (new), `reports/2026-11-07-p7-fleet-and-p.md`, `reports/README.md` (its own row) |
-| external researcher | P7 unstringing measurement and the next GENI suspects (refinement with GENI, reinsertion with GENI); Q6/A2/Q10 reports from the owner's run data; the Q7 tai256c and Q6 tai60a GPU runs' reports; `--table auto` thread default (done) | `examples/cvrp.rs`, `examples/common/vrp.rs`, `examples/common/geni.rs`, `examples/coloring_gpu.rs`, `examples/qap_gpu.rs`, `examples/qap_advanced.rs`, `scripts/q6-*`, `scripts/q10-*`, `scripts/verify_*.py`, their reports, `reports/README.md` (its own rows) |
+| external researcher | P7 unstringing measurement (result pending) and the next GENI suspects, implemented as `--refine geni` and `--reinsert geni` (measure each alone on Golden 1–4 and 9–12, one seed, 10⁵, default fleet); the Golden 7/8 phase log (done); Q6/A2/Q10 reports from the owner's run data; the Q7 tai256c and Q6 tai60a GPU runs' reports; `--table auto` thread default (done) | `examples/cvrp.rs`, `examples/common/vrp.rs`, `examples/common/geni.rs`, `examples/coloring_gpu.rs`, `examples/qap_gpu.rs`, `examples/qap_advanced.rs`, `scripts/q6-*`, `scripts/q10-*`, `scripts/verify_*.py`, their reports, `reports/README.md` (its own rows) |
 | head of research | decisions, `PLAN-problems.md`, `DESIGN.md` entries that record decisions | `PLAN-problems.md`, `DESIGN.md`, `QAPLIB.md`, `README.md` |
 
 Rules: an item not in the table is unassigned; a researcher claims it by
