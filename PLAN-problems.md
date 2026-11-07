@@ -789,23 +789,32 @@ Decisions:
    paper on 8 of 20. Revised decisions:
    * The Golden pass mark is **1.50% against today's best known** (the
      paper's 1.30% rebased), and the summary reports both gaps.
-   * The fleet moves ahead of the remaining GENI suspects. The paper runs
-     with the reference fleet and no spare ("the first m − 1 routes are
-     feasible" at the start), and the plain-insertion diagnostic without
-     the spare gained most exactly on Golden 2–4. Measure GENI without
-     the spare on Golden 1–6, 9–12 and 18 (one seed, 10⁵). Then find out
-     why Golden 7 and 8 reach no feasible solution with the reference
-     fleet in 10⁵ iterations: log β (the duration weight) and the total
-     duration violation per phase; the paper's algorithm has the same
-     start and must get there, so a weight that never grows enough, a
-     refinement that undoes feasibility, or a perturbation that reinserts
-     without the duration term is the kind of thing to look for. If the
-     fleet closes Golden 3 and 4, the spare goes and `--no-spare` becomes
-     the default; the acceptance then needs feasibility on every run,
-     which the summary must check (it recounts, so it does).
-   * Unstringing's measurement completes as started; the refinement and
-     reinsertion suspects follow only if the fleet does not close the
-     gap.
+   * **Correction (2026-11-07).** The paper's fleet is Table 9's m
+     column, not "no spare": m is the reference's route count + 1 on 17
+     of the 20 Golden instances and + 2 on Golden 1, 7 and 8 (m = 11, 10,
+     12 against 9, 8, 10 routes today); on CMT it is often + 2 (CMT5:
+     m = 20 for 16 routes). So our default, reference + 1, *is* the
+     paper's fleet except on Golden 1, 7, 8, where it is one short. The
+     no-spare runs use a smaller fleet than the paper's, and the
+     infeasibility on Golden 7 and 8 is a tight fleet, not a bug: with
+     plain insertion and the reference count, Golden 8 (10 vehicles)
+     turns feasible after about 600,000 iterations and ends at 1.17% at
+     10⁶; Golden 7 (8 vehicles) finds no feasible solution in 10⁶.
+     Decisions: the acceptance runs use the paper's m per instance
+     (`--vehicles`, a table in the runner from Table 9: Golden 11, 11,
+     11, 11, 6, 8, 10, 12, 15, 17, 19, 20, 27, 31, 34, 38, 23, 28, 34,
+     39; CMT 5, 12, 10, 14, 20, 7, 13, 10, 16, 20, 8, 10, 13, 11); the
+     default stays reference + 1. The fleet is a knob, not the
+     explanation of Golden 3 and 4: the paper reached 0.24% and 0.76%
+     there with the same m = 11 we use. The GENI-without-spare
+     measurement (head of research, running: Golden 3 goes 2.57% →
+     1.20% at m = 10) is reported for what it says about the knob.
+   * With the fleet ruled out, Golden 3 and 4 (n = 400, 480, route length
+     limit) stay unexplained at equal m. Suspects, cheapest first: GENI's
+     neighbourhood size p (5 is our choice; the paper does not state q
+     in the pages read; try 7 and 10 on Golden 3 and 4, one seed each),
+     then unstringing (running), then GENI with q doubled in the route
+     refinement, then GENI in the cluster reinsertion.
 3. The parallel scheme (step 8) follows Golden. The paper's scaling curve
    (Fig. 2) is on pr05, a *periodic* VRP instance the port does not read;
    measure the curve on CMT5 and Golden 20 instead, at 125,000 iterations

@@ -76,15 +76,28 @@ its own references, are 1.30% and 0.79%.)
   0.32 points. One seed per instance, so ±0.5 on any one is noise; two
   points is not.
 * Golden 3 and 4 are the largest route-length-limited instances (400 and
-  480 customers, 11 vehicles), and they are exactly where the fleet
-  diagnostic (`2026-11-06-p7-acceptance-and-diagnostics.md`, plain
-  insertion) gained most without the spare vehicle: Golden 2 3.40 →
-  0.92, Golden 3 3.13 → 1.63, Golden 4 2.90 → 2.12. The paper's fleet is
-  fixed at m with "the first m − 1 routes feasible" at the start, i.e. no
-  spare: the paper's own algorithm runs with the reference fleet and
-  relies on the penalties to reach feasibility. Our failure to find any
-  feasible solution on Golden 7 and 8 with that fleet in 10⁵ iterations
-  is therefore itself a discrepancy, not a reason to keep the spare.
+  480 customers), and they are exactly where the fleet diagnostic
+  (`2026-11-06-p7-acceptance-and-diagnostics.md`, plain insertion) gained
+  most without the spare vehicle: Golden 2 3.40 → 0.92, Golden 3 3.13 →
+  1.63, Golden 4 2.90 → 2.12.
+* **Fleet, corrected the same day.** The paper's fleet is the m column of
+  Table 9. Against today's reference route counts:
+
+  | Golden | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | paper m | 11 | 11 | 11 | 11 | 6 | 8 | 10 | 12 | 15 | 17 | 19 | 20 | 27 | 31 | 34 | 38 | 23 | 28 | 34 | 39 |
+  | reference routes | 9 | 10 | 10 | 10 | 5 | 7 | 8 | 10 | 14 | 16 | 18 | 19 | 26 | 30 | 33 | 37 | 22 | 27 | 33 | 38 |
+
+  So the paper's m is reference + 1 on 17 instances and + 2 on Golden
+  1, 7, 8: our default (reference + 1) is the paper's fleet except there,
+  and `--no-spare` is a *smaller* fleet than the paper's. On CMT the
+  paper's m is reference + 2 on most instances (CMT5: 20 for 16 routes),
+  and the port matches the paper with + 1. The infeasibility on Golden 7
+  and 8 without the spare is a tight fleet: with plain insertion at
+  η = 10⁶ (seed 1), Golden 8 at 10 vehicles turns feasible at about
+  600,000 iterations and ends at 1.17%; Golden 7 at 8 vehicles never
+  does. Not a discrepancy. The paper reached 0.24% and 0.76% on Golden 3
+  and 4 with the m = 11 we use, so the fleet does not explain them.
 * The acceptance runs should report both gaps (to today's best known and
   to the paper's reference), so that the comparison with Table 9 is at
   equal footing; `p7-summary.py` needs the paper's reference column
