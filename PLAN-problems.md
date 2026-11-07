@@ -863,6 +863,31 @@ Decisions:
         (relocating a short route's last customers under the penalty
         oscillation), ahead of `--refine geni` and `--reinsert geni`,
         which then wait.
+     4. **Confirmed** (`reports/2026-11-07-p7-extra-route.md`): an extra
+        route appears only on the length-limited Golden 2, 3, 4, 7, 8
+        (and once on 18), and within an instance it costs about two
+        points (Golden 2: 10 routes 0.67–0.80%, 11 routes 2.98–3.40%;
+        Golden 4: 1.18% against 2.44–2.90%). Golden 3 never ends below 11
+        routes in any run. On GENI at 10⁵ the four extra-route instances
+        are 0.22 of the 0.31-point set deficit; the other 16 are within
+        0.1 of the paper. `--refine geni`: no gain (1.84% against
+        1.75%), stays a flag. GENI's p: 7 on Golden 3 gives 3.14% with
+        11 routes at 3.5× the time; the p sweep is stopped, p = 5 stays.
+     5. **The mechanism, and the fix to test first.** The phase log shows
+        11 routes from the first phase: our sweep opens all m routes at
+        the start. The paper's sweep (§2.2) opens a new route only when
+        inserting the next customer into the current one would violate
+        capacity or duration, "unless there are no more vehicles left",
+        so it ends with as many routes as the sweep needs and the spare
+        stays empty unless needed. Make the sweep the paper's, rerun
+        Golden 2, 3, 4, 7, 8 (GENI, seed 1, 10⁵, default fleet) and count
+        routes. If the extra route is gone on most of them, the Golden
+        acceptance (10 seeds, paper's m, both gaps) follows at once. If
+        a run still opens and keeps the spare mid-search, the next
+        suspect is the emptying mechanism, watched with `--phase-log`
+        (when the route fills, whether it ever empties), and
+        `--reinsert geni` is read for whether it reinserts into an empty
+        route.
 3. The parallel scheme (step 8) follows Golden. The paper's scaling curve
    (Fig. 2) is on pr05, a *periodic* VRP instance the port does not read;
    measure the curve on CMT5 and Golden 20 instead, at 125,000 iterations
@@ -951,8 +976,8 @@ every push. To avoid two hands on one file:
 
 | who | holds, until the item's report is on the branch | files it may edit |
 |---|---|---|
-| in-session subagent | P7 fleet measurement (done, reported); GENI p = 7/10 on Golden 3 and 4 (running, part 3 of its report); `FLEET=paper` in the runner and the paper-reference column in the summary | `scripts/p7-cvrp.sh`, `scripts/p7-summary.py`, `scripts/paper_table9.py` (new), `reports/2026-11-07-p7-fleet-and-p.md`, `reports/README.md` (its own row) |
-| external researcher | P7, in this order: (1) the route-count check on the saved with-spare solutions (zero cost; report routes used vs reference per instance), (2) if confirmed, routes in use in `--phase-log` and the Golden 3 watch at m = 11, (3) only then `--refine geni` and `--reinsert geni` measured alone on Golden 1–4 and 9–12; unstringing (done, no gain); the Golden 7/8 phase log (done); Q6/A2/Q10 reports from the owner's run data; the Q7 tai256c and Q6 tai60a GPU runs' reports | `examples/cvrp.rs`, `examples/common/vrp.rs`, `examples/common/geni.rs`, `examples/coloring_gpu.rs`, `examples/qap_gpu.rs`, `examples/qap_advanced.rs`, `scripts/q6-*`, `scripts/q10-*`, `scripts/verify_*.py`, their reports, `reports/README.md` (its own rows) |
+| in-session subagent | P7 fleet measurement (done, reported); GENI p sweep (stopped after p = 7 on Golden 3; finishing its report); `FLEET=paper` in the runner and the paper-reference column in the summary; then released | `scripts/p7-cvrp.sh`, `scripts/p7-summary.py`, `scripts/paper_table9.py` (new), `reports/2026-11-07-p7-fleet-and-p.md`, `reports/README.md` (its own row) |
+| external researcher | P7, in this order: (1) the paper's sweep (a new route only when the current one would violate capacity or duration; the spare stays empty unless needed), rerun Golden 2, 3, 4, 7, 8 with GENI, seed 1, 10⁵, default fleet, routes counted; (2) if the extra route is gone, the Golden acceptance at `FLEET=paper`, 10 seeds, 10⁵, both gaps; else the emptying watch with `--phase-log` and the `--reinsert geni` report; the route-count check and `--refine geni` (done); unstringing (done, no gain); Q6/A2/Q10 reports from the owner's run data; the Q7 tai256c and Q6 tai60a GPU runs' reports | `examples/cvrp.rs`, `examples/common/vrp.rs`, `examples/common/geni.rs`, `examples/coloring_gpu.rs`, `examples/qap_gpu.rs`, `examples/qap_advanced.rs`, `scripts/q6-*`, `scripts/q10-*`, `scripts/verify_*.py`, their reports, `reports/README.md` (its own rows) |
 | head of research | decisions, `PLAN-problems.md`, `DESIGN.md` entries that record decisions | `PLAN-problems.md`, `DESIGN.md`, `QAPLIB.md`, `README.md` |
 
 Rules: an item not in the table is unassigned; a researcher claims it by
