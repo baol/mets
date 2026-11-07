@@ -22,6 +22,9 @@
 //!        [--insertion best|geni] [--removal reconnect|unstring] [--geni-p P]
 //!        (defaults best, reconnect; P = 5 for both GENI insertion and unstringing)
 //!        [--phase-log]  one line per phase: feasibility, excesses, α, β
+//!        [--refine 2opt|geni]  route refinement every 200 iterations: 2-opt/Or-opt
+//!                       (default) or the paper's unstringing + GENI with p doubled
+//!        [--reinsert best|geni]  cluster reinsertion: best plain (default) or GENI
 //!       solve; the best feasible solution is saved as NAME.sol (CVRPLIB format,
 //!       or the first free NAME.2.sol, …); a .sol gives the gap to its cost and,
 //!       by default, the fleet size (its routes, plus one spare vehicle)
@@ -89,6 +92,8 @@ fn its(
     geni_p: usize,
     unstring_p: usize,
     phase_log: bool,
+    refine_p: usize,
+    reinsert_p: usize,
 ) -> (f64, Vec<Vec<usize>>) {
     let n = inst.n;
     let t0 = Instant::now();
@@ -188,7 +193,11 @@ fn its(
                             (if t { w.duration * up } else { w.duration / up }).clamp(1e-6, 1e9);
                     }
                     if refine {
-                        r.refine();
+                        if refine_p > 0 {
+                            r.refine_geni(refine_p);
+                        } else {
+                            r.refine();
+                        }
                     }
                 })
             });
@@ -233,7 +242,7 @@ fn its(
             );
         }
         pi = rng.random_range(0..=pi_max);
-        cluster_perturbation(&mut s, pi, &mut rng);
+        cluster_perturbation(&mut s, pi, reinsert_p, &mut rng);
         if phase.is_multiple_of(50) {
             let g = reference.map_or(String::new(), |r| {
                 format!(" (gap {:.2}%)", (best.0 - r) / r * 100.0)
@@ -267,6 +276,17 @@ fn main() {
     let vehicles: Option<usize> = args.value("--vehicles");
     let p: usize = args.value("--geni-p").unwrap_or(5);
     let phase_log = args.flag("--phase-log");
+    // the paper's refinement: unstringing and GENI within each route, q doubled
+    let refine_p = match args.value::<String>("--refine").as_deref() {
+        None | Some("2opt") => 0,
+        Some("geni") => 2 * p,
+        Some(x) => panic!("--refine 2opt|geni, not {x:?}"),
+    };
+    let reinsert_p = match args.value::<String>("--reinsert").as_deref() {
+        None | Some("best") => 0,
+        Some("geni") => p,
+        Some(x) => panic!("--reinsert best|geni, not {x:?}"),
+    };
     let geni_p = match args.value::<String>("--insertion").as_deref() {
         None | Some("best") => 0,
         Some("geni") => p,
@@ -305,6 +325,19 @@ fn main() {
     } else {
         "removal by reconnection".to_string()
     };
+    let removal = format!(
+        "{removal}, refinement {}, reinsertion {}",
+        if refine_p > 0 {
+            format!("by unstringing and GENI, p = {refine_p}")
+        } else {
+            "by 2-opt/Or-opt".to_string()
+        },
+        if reinsert_p > 0 {
+            format!("by GENI, p = {reinsert_p}")
+        } else {
+            "best".to_string()
+        }
+    );
     println!(
         "{}: {} customers, capacity {}, {}route limit, {m} vehicles; {insertion}, {removal}; η = {eta}, seed {seed}; build {}",
         inst.name,
@@ -324,6 +357,8 @@ fn main() {
         geni_p,
         unstring_p,
         phase_log,
+        refine_p,
+        reinsert_p,
     );
     let secs = t0.elapsed().as_secs_f64();
     if routes.is_empty() {
@@ -717,5 +752,71 @@ mod tests {
         let mut fresh = s.clone();
         fresh.rebuild();
         assert!((fresh.distance() - s.distance()).abs() < 1e-6);
+    }
+
+    /// The GENI refinement keeps every route's customers, never lengthens a
+    /// route, keeps the tables right, and does improve a random start; on
+    /// routes of 0 to 5 customers it is safe (no move under 3).
+    #[test]
+    fn geni_refinement_shortens_and_keeps_the_customers() {
+        let inst = instance(40, 9);
+        let mut rng = DefaultRng::seed_from_u64(10);
+        let mut order: Vec<usize> = (1..inst.n).collect();
+        for i in (1..order.len()).rev() {
+            order.swap(i, rng.random_range(0..=i));
+        }
+        // random routes of sizes 0..=5, then the rest in long routes
+        let mut routes = vec![vec![]];
+        let mut it = order.into_iter();
+        for size in 1..=5 {
+            routes.push(it.by_ref().take(size).collect());
+        }
+        let rest: Vec<usize> = it.collect();
+        routes.extend(rest.chunks(8).map(|c| c.to_vec()));
+        let m = routes.len();
+        let mut s = Routes::with_vehicles(&inst, routes.clone(), m, Penalties::default());
+        let before = s.length.clone();
+        let moved = s.refine_geni(10);
+        assert!(moved > 0, "a random start must improve");
+        for k in 0..m {
+            assert!(s.length[k] <= before[k] + 1e-9, "route {k} lengthened");
+            let mut a = s.customers(k);
+            let mut b = routes[k].clone();
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "route {k} changed customers");
+        }
+        let mut fresh = s.clone();
+        fresh.rebuild();
+        for k in 0..m {
+            assert!((fresh.length[k] - s.length[k]).abs() < 1e-6);
+        }
+        // a second pass from a GENI-refined solution changes less
+        assert!(s.clone().refine_geni(10) <= moved);
+    }
+
+    /// Cluster perturbation with GENI reinsertion keeps every customer on
+    /// exactly one route and the tables equal to a rebuild.
+    #[test]
+    fn geni_cluster_reinsertion_keeps_the_solution_whole() {
+        let inst = instance(40, 11);
+        let mut rng = DefaultRng::seed_from_u64(12);
+        let mut s = sweep(&inst, 9, &mut rng);
+        for round in 0..30 {
+            cluster_perturbation(&mut s, rng.random_range(0..=7), 5, &mut rng);
+            let mut all: Vec<usize> = s.routes().concat();
+            all.sort();
+            assert_eq!(all, (1..inst.n).collect::<Vec<_>>(), "round {round}");
+            let mut fresh = s.clone();
+            fresh.rebuild();
+            for k in 0..s.m {
+                assert!(
+                    (fresh.length[k] - s.length[k]).abs() < 1e-6,
+                    "round {round}"
+                );
+                assert!((fresh.load[k] - s.load[k]).abs() < 1e-9);
+                assert_eq!(fresh.size[k], s.size[k]);
+            }
+        }
     }
 }

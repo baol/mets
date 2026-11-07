@@ -575,6 +575,39 @@ impl<'a> Routes<'a> {
         }
     }
 
+    /// The paper's route refinement: each route is rebuilt by removing each
+    /// of its customers in turn (unstringing) and reinserting it in the
+    /// same route (GENI), both with neighbourhoods of size p (the paper
+    /// doubles its q here); a customer's move is kept only if the route
+    /// gets shorter. Returns the number of customers moved.
+    pub fn refine_geni(&mut self, p: usize) -> usize {
+        let mut moved = 0;
+        for k in 0..self.m {
+            if self.size[k] < 3 {
+                continue;
+            }
+            let order = self.customers(k);
+            let mut tour = self.tour(k);
+            let mut changed = false;
+            for c in order {
+                let d = |a: usize, b: usize| self.d(a, b);
+                let near = geni::Near::new(&tour, p, &d);
+                let u = geni::best_unstring(&tour, &near, c, p, &d);
+                let without = geni::unstring(&tour, c, &u);
+                let g = geni::best(&without, c, p, &d);
+                if u.delta + g.added < -1e-9 {
+                    tour = geni::apply(&without, c, &g);
+                    changed = true;
+                    moved += 1;
+                }
+            }
+            if changed {
+                self.relink(k, &tour[1..]);
+            }
+        }
+        moved
+    }
+
     /// 2-opt and Or-opt on a route's customer sequence (depot at both ends);
     /// true if it changed.
     fn improve_sequence(&self, seq: &mut Vec<usize>) -> bool {
@@ -981,7 +1014,14 @@ pub fn sweep<'a>(inst: &'a Instance, m: usize, rng: &mut impl mets::rand::Rng) -
 /// random seed customer and its π closest customers are removed and
 /// reinserted one by one, in random order, at least distance over all
 /// routes (the first empty route included).
-pub fn cluster_perturbation(s: &mut Routes, pi: usize, rng: &mut impl mets::rand::Rng) {
+/// With `geni_p` > 0 each customer goes to its best GENI insertion
+/// (types I and II and plain) over all routes instead of the best plain one.
+pub fn cluster_perturbation(
+    s: &mut Routes,
+    pi: usize,
+    geni_p: usize,
+    rng: &mut impl mets::rand::Rng,
+) {
     let n = s.inst.n;
     let seed = rng.random_range(1..n);
     let mut by: Vec<usize> = (1..n).collect();
@@ -1000,6 +1040,21 @@ pub fn cluster_perturbation(s: &mut Routes, pi: usize, rng: &mut impl mets::rand
     }
     for c in cluster {
         let first_empty = (0..s.m).find(|&k| s.size[k] == 0);
+        if geni_p > 0 {
+            let d = |a: usize, b: usize| s.d(a, b);
+            let (k, g) = (0..s.m)
+                .filter(|&k| s.size[k] > 0 || Some(k) == first_empty)
+                .map(|k| (k, geni::best(&s.tour(k), c, geni_p, &d)))
+                .min_by(|x, y| x.1.added.total_cmp(&y.1.added))
+                .expect("a route");
+            if g.kind == 0 {
+                let after = s.tour(k)[g.i as usize];
+                s.put(c, after);
+            } else {
+                s.put_geni(c, k, &g);
+            }
+            continue;
+        }
         let (k, a) = (0..s.m)
             .filter(|&k| s.size[k] > 0 || Some(k) == first_empty)
             .map(|k| {
