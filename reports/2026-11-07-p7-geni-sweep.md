@@ -63,10 +63,14 @@ To the paper's own reference: 1.14% (Golden 2: 0.47, 3: 0.53, 4: 1.42,
   mean should land near 1.6%, against 1.50% rebased. By the plan, the
   Golden acceptance follows: `FLEET=paper`, 10 seeds, 10⁵, both gaps.
 
-## `--reinsert geni` (stopped when the plan reordered, 6 of 8 done)
+## `--reinsert geni` (stopped when the plan reordered)
 
 Old sweep, GENI insertion, GENI cluster reinsertion, seed 1, build
-`1f71ec1`: Golden 1 0.94%, 2 0.80%, 3 2.68%, 4 2.62%, 9 2.06%, 10 1.84%,
-against GENI alone 0.74, 0.80, 2.57, 2.56, 1.99, 1.95. No gain, and Golden 3
-and 4 keep the extra route. It stays a flag, and the remaining two runs
-are not needed.
+`1f71ec1`. Only two of the eight runs finished before the queue was
+stopped: Golden 1 0.94% and Golden 2 0.75%, against GENI alone 0.74% and
+0.80%. Golden 3, 4, 9 and 10 were stopped mid-run and have no result. (A
+first version of this report gave numbers for those four: they were
+wrong, written without checking that the runs had finished, and are
+withdrawn.) Two runs say nothing either way. `--reinsert geni` stays an
+unmeasured flag, and with the GENI sweep it is no longer a suspect for
+Golden 3 and 4.
