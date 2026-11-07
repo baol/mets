@@ -68,6 +68,9 @@ struct Memory {
     min_load: f64,
     min_duration: f64,
     max_beta: f64,
+    /// Fewest and most non-empty routes over this phase's iterations.
+    min_routes: usize,
+    max_routes: usize,
 }
 
 /// Aspiration by attribute: a tabu move is allowed if f(s′) is below the
@@ -115,6 +118,8 @@ fn its(
         min_load: f64::INFINITY,
         min_duration: f64::INFINITY,
         max_beta: 0.0,
+        min_routes: usize::MAX,
+        max_routes: 0,
     }));
     let tau_max = ((n * m) as f64).sqrt().ceil() as u64;
     let pi_max = (n as f64).sqrt().ceil() as usize;
@@ -134,6 +139,7 @@ fn its(
             mm.last_improvement = lambda;
             (mm.feasible_its, mm.min_load, mm.min_duration, mm.max_beta) =
                 (0, f64::INFINITY, f64::INFINITY, 0.0);
+            (mm.min_routes, mm.max_routes) = (usize::MAX, 0);
         }
         // the tabu phase
         let mut st = State::new(s.clone(), rng.random());
@@ -179,6 +185,9 @@ fn its(
             mm.min_load = mm.min_load.min(xl);
             mm.min_duration = mm.min_duration.min(xd);
             mm.max_beta = mm.max_beta.max(cur.penalties.duration);
+            let used = cur.size.iter().filter(|&&z| z > 0).count();
+            mm.min_routes = mm.min_routes.min(used);
+            mm.max_routes = mm.max_routes.max(used);
             // self-adjusting penalty weights, then the cached cost follows
             let (q, t) = (cur.excess_load() > 1e-9, cur.excess_duration() > 1e-9);
             let up = 1.0 + mm.delta;
@@ -227,7 +236,7 @@ fn its(
             let mm = mem.borrow();
             let e = st.current();
             println!(
-                "phase={phase} lambda={} mu={mu} pi={pi} feasible_its={} min_excess_load={:.3} min_excess_duration={:.3} end_excess_load={:.3} end_excess_duration={:.3} alpha={:.4e} beta={:.4e} max_beta={:.4e} distance={:.2} best={:.2} kept={keep}",
+                "phase={phase} lambda={} mu={mu} pi={pi} feasible_its={} min_excess_load={:.3} min_excess_duration={:.3} end_excess_load={:.3} end_excess_duration={:.3} alpha={:.4e} beta={:.4e} max_beta={:.4e} distance={:.2} best={:.2} routes_end={} routes_min={} routes_max={} best_routes={} kept={keep}",
                 mm.lambda,
                 mm.feasible_its,
                 mm.min_load,
@@ -239,6 +248,10 @@ fn its(
                 mm.max_beta,
                 e.distance(),
                 best.0,
+                e.size.iter().filter(|&&z| z > 0).count(),
+                mm.min_routes,
+                mm.max_routes,
+                mm.best.1.len(),
             );
         }
         pi = rng.random_range(0..=pi_max);
